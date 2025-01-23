@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 
 	resourceapi "k8s.io/api/resource/v1beta1"
@@ -28,6 +29,8 @@ import (
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
+
+	"golang.org/x/mod/semver"
 
 	configapi "github.com/NVIDIA/k8s-dra-driver/api/nvidia.com/resource/gpu/v1alpha1"
 )
@@ -413,7 +416,20 @@ func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.S
 		if err != nil {
 			return nil, fmt.Errorf("error getting MPS configuration: %w", err)
 		}
-		mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(string(claim.UID), allocatableDevices)
+
+		// make a list of MPS capable devices
+		mpsAllocatableDevices := make(AllocatableDevices)
+		for device, deviceType := range allocatableDevices {
+			if deviceType.Gpu != nil {
+				cudaCCv := "v" + strings.TrimPrefix(deviceType.Gpu.cudaComputeCapability, "v")
+				if semver.Compare(semver.Canonical(cudaCCv), semver.Canonical("v3.5")) >= 0 {
+					mpsAllocatableDevices[device] = deviceType
+				} else {
+					fmt.Errorf("Device %s skipped for insufficient compute capability: %s\n", device, cudaCCv)
+				}
+			}
+		}
+		mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(string(claim.UID), mpsAllocatableDevices)
 		if err := mpsControlDaemon.Start(ctx, mpsc); err != nil {
 			return nil, fmt.Errorf("error starting MPS control daemon: %w", err)
 		}
