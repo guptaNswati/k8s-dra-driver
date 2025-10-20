@@ -37,7 +37,7 @@ const (
 	// IMEXDaemonsWithDNSNames allows using DNS names instead of raw IPs for IMEX daemons.
 	IMEXDaemonsWithDNSNames featuregate.Feature = "IMEXDaemonsWithDNSNames"
 
-	// DeviceHealthCheck allows Device Health Checking
+	// DeviceHealthCheck allows Device Health Checking.
 	DeviceHealthCheck featuregate.Feature = "DeviceHealthCheck"
 )
 

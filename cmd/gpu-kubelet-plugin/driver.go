@@ -222,7 +222,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 
 			// Republish resource slice with only healthy devices
 			// There is no remediation loop right now meaning if the unhealthy device is fixed,
-			// driver needs to be restarted to publsih the resourceslice with all devices
+			// driver needs to be restarted to publish the resourceslice with all devices
 			var resourceSlice resourceslice.Slice
 			for _, dev := range d.state.allocatable {
 				uuid := dev.UUID()
@@ -234,7 +234,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 				}
 			}
 
-			klog.V(6).Info("[Rebulishing resourceslice with healthy devices")
+			klog.V(6).Info("Rebulishing resourceslice with healthy devices")
 			resources := resourceslice.DriverResources{
 				Pools: map[string]resourceslice.Pool{
 					nodeName: {Slices: []resourceslice.Slice{resourceSlice}},

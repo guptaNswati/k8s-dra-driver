@@ -127,7 +127,7 @@ func (m *deviceHealthMonitor) Stop() {
 	close(m.stop)
 	m.wg.Wait()
 
-	m.eventSet.Free()
+	_ = m.eventSet.Free()
 
 	if ret := m.nvmllib.Shutdown(); ret != nvml.SUCCESS {
 		klog.Warningf("failed to shutdown NVML: %v", ret)

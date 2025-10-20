@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	// Healthy means that the device is healthy
+	// Healthy means that the device is healthy.
 	Healthy = "Healthy"
-	// Unhealthy means that the device is unhealthy
+	// Unhealthy means that the device is unhealthy.
 	Unhealthy = "Unhealthy"
 )
 
