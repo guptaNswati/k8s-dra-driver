@@ -214,8 +214,20 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 				klog.V(6).Info("Health monitor channel closed")
 				return
 			}
+			uuid := device.UUID()
 
-			klog.Warningf("Received unhealthy notification for device: %s", device.UUID())
+			klog.Warningf("Received unhealthy notification for device: %s", uuid)
+
+			if !device.IsHealthy() {
+				klog.V(6).Info("Device: %s is aleady marked unhealthy. Skip republishing resourceslice", uuid)
+				continue
+			}
+
+			release, err := d.pulock.Acquire(ctx, flock.WithTimeout(10*time.Second))
+			if err != nil {
+				klog.Errorf("error acquiring prep/unprep lock for health status update: %w", err)
+				continue
+			}
 
 			// Mark device as unhealthy.
 			d.state.UpdateDeviceHealthStatus(device, Unhealthy)
@@ -246,6 +258,8 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			} else {
 				klog.V(6).Info("Successfully republished resources without unhealthy device")
 			}
+
+			release()
 		}
 	}
 }

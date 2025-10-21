@@ -35,7 +35,7 @@ type deviceHealthMonitor struct {
 	nvmllib         nvml.Interface
 	eventSet        nvml.EventSet
 	unhealthy       chan *AllocatableDevice
-	stop            chan struct{}
+	cancelContext   context.CancelFunc
 	uuidToDeviceMap map[string]*AllocatableDevice
 	wg              sync.WaitGroup
 }
@@ -45,13 +45,16 @@ func newDeviceHealthMonitor(ctx context.Context, config *Config, allocatable All
 		return nil, fmt.Errorf("nvml library is nil")
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+
 	m := &deviceHealthMonitor{
-		nvmllib:   nvdevlib.nvmllib,
-		unhealthy: make(chan *AllocatableDevice, len(allocatable)),
-		stop:      make(chan struct{}),
+		nvmllib:       nvdevlib.nvmllib,
+		unhealthy:     make(chan *AllocatableDevice, len(allocatable)),
+		cancelContext: cancel,
 	}
 
 	if ret := m.nvmllib.Init(); ret != nvml.SUCCESS {
+		cancel()
 		return nil, fmt.Errorf("failed to initialize NVML: %v", ret)
 	}
 
@@ -59,6 +62,7 @@ func newDeviceHealthMonitor(ctx context.Context, config *Config, allocatable All
 	eventSet, ret := m.nvmllib.EventSetCreate()
 	if ret != nvml.SUCCESS {
 		_ = m.nvmllib.Shutdown()
+		cancel()
 		return nil, fmt.Errorf("failed to create event set: %w", ret)
 	}
 	m.eventSet = eventSet
@@ -71,7 +75,7 @@ func newDeviceHealthMonitor(ctx context.Context, config *Config, allocatable All
 	skippedXids := m.xidsToSkip(config.flags.additionalXidsToIgnore)
 	klog.V(6).Info("started device health monitoring")
 	m.wg.Add(1)
-	go m.run(skippedXids)
+	go m.run(ctx, skippedXids)
 
 	return m, nil
 }
@@ -124,7 +128,10 @@ func (m *deviceHealthMonitor) Stop() {
 	}
 	klog.V(6).Info("stopping health monitor")
 
-	close(m.stop)
+	if m.cancelContext != nil {
+		m.cancelContext()
+	}
+
 	m.wg.Wait()
 
 	_ = m.eventSet.Free()
@@ -146,11 +153,11 @@ func getUUIDToDeviceMap(allocatable AllocatableDevices) map[string]*AllocatableD
 	return uuidToDeviceMap
 }
 
-func (m *deviceHealthMonitor) run(skippedXids map[uint64]bool) {
+func (m *deviceHealthMonitor) run(ctx context.Context, skippedXids map[uint64]bool) {
 	defer m.wg.Done()
 	for {
 		select {
-		case <-m.stop:
+		case <-ctx.Done():
 			klog.V(6).Info("Stopping event-driven GPU health monitor...")
 			return
 		default:
@@ -189,10 +196,8 @@ func (m *deviceHealthMonitor) run(skippedXids map[uint64]bool) {
 			var affectedDevice *AllocatableDevice
 			if event.GpuInstanceId != FullGPUInstanceID && event.ComputeInstanceId != FullGPUInstanceID {
 				affectedDevice = m.findMigDevice(eventUUID, event.GpuInstanceId, event.ComputeInstanceId)
-				klog.Infof("Event for mig device: %s", affectedDevice.UUID())
 			} else {
 				affectedDevice = m.findGpuDevice(eventUUID)
-				klog.Infof("Event for device: %s", affectedDevice.UUID())
 			}
 
 			if affectedDevice == nil {
