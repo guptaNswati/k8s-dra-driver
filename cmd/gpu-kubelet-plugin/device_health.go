@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,23 +31,24 @@ const (
 	FullGPUInstanceID uint32 = 0xFFFFFFFF
 )
 
-type deviceHealthMonitor struct {
-	nvmllib         nvml.Interface
-	eventSet        nvml.EventSet
-	unhealthy       chan *AllocatableDevice
-	cancelContext   context.CancelFunc
-	uuidToDeviceMap map[string]*AllocatableDevice
-	wg              sync.WaitGroup
+type nvmlDeviceHealthMonitor struct {
+	nvmllib                  nvml.Interface
+	eventSet                 nvml.EventSet
+	unhealthy                chan *AllocatableDevice
+	cancelContext            context.CancelFunc
+	uuidToDeviceMap          map[string]*AllocatableDevice
+	getDeviceByParentGiCiMap map[string]map[uint32]map[uint32]*AllocatableDevice
+	wg                       sync.WaitGroup
 }
 
-func newDeviceHealthMonitor(ctx context.Context, config *Config, allocatable AllocatableDevices, nvdevlib *deviceLib) (*deviceHealthMonitor, error) {
+func newNvmlDeviceHealthMonitor(ctx context.Context, config *Config, allocatable AllocatableDevices, nvdevlib *deviceLib) (*nvmlDeviceHealthMonitor, error) {
 	if nvdevlib.nvmllib == nil {
 		return nil, fmt.Errorf("nvml library is nil")
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 
-	m := &deviceHealthMonitor{
+	m := &nvmlDeviceHealthMonitor{
 		nvmllib:       nvdevlib.nvmllib,
 		unhealthy:     make(chan *AllocatableDevice, len(allocatable)),
 		cancelContext: cancel,
@@ -69,8 +70,10 @@ func newDeviceHealthMonitor(ctx context.Context, config *Config, allocatable All
 
 	m.uuidToDeviceMap = getUUIDToDeviceMap(allocatable)
 
+	m.getDeviceByParentGiCiMap = getDeviceByParentGiCiMap(allocatable)
+
 	klog.V(6).Info("registering NVML events for device health monitor")
-	m.registerDevicesForEvents()
+	m.registerEventsForDevices()
 
 	skippedXids := m.xidsToSkip(config.flags.additionalXidsToIgnore)
 	klog.V(6).Info("started device health monitoring")
@@ -80,7 +83,7 @@ func newDeviceHealthMonitor(ctx context.Context, config *Config, allocatable All
 	return m, nil
 }
 
-func (m *deviceHealthMonitor) registerDevicesForEvents() {
+func (m *nvmlDeviceHealthMonitor) registerEventsForDevices() {
 	eventMask := uint64(nvml.EventTypeXidCriticalError | nvml.EventTypeDoubleBitEccError | nvml.EventTypeSingleBitEccError)
 
 	processedUUIDs := make(map[string]bool)
@@ -122,7 +125,7 @@ func (m *deviceHealthMonitor) registerDevicesForEvents() {
 	}
 }
 
-func (m *deviceHealthMonitor) Stop() {
+func (m *nvmlDeviceHealthMonitor) Stop() {
 	if m == nil {
 		return
 	}
@@ -153,7 +156,7 @@ func getUUIDToDeviceMap(allocatable AllocatableDevices) map[string]*AllocatableD
 	return uuidToDeviceMap
 }
 
-func (m *deviceHealthMonitor) run(ctx context.Context, skippedXids map[uint64]bool) {
+func (m *nvmlDeviceHealthMonitor) run(ctx context.Context, skippedXids map[uint64]bool) {
 	defer m.wg.Done()
 	for {
 		select {
@@ -194,10 +197,12 @@ func (m *deviceHealthMonitor) run(ctx context.Context, skippedXids map[uint64]bo
 			}
 
 			var affectedDevice *AllocatableDevice
-			if event.GpuInstanceId != FullGPUInstanceID && event.ComputeInstanceId != FullGPUInstanceID {
-				affectedDevice = m.findMigDevice(eventUUID, event.GpuInstanceId, event.ComputeInstanceId)
-			} else {
-				affectedDevice = m.findGpuDevice(eventUUID)
+			pMap, ok1 := m.getDeviceByParentGiCiMap[eventUUID]
+			if ok1 {
+				giMap, ok2 := pMap[event.GpuInstanceId]
+				if ok2 {
+					affectedDevice = giMap[event.ComputeInstanceId]
+				}
 			}
 
 			if affectedDevice == nil {
@@ -211,31 +216,46 @@ func (m *deviceHealthMonitor) run(ctx context.Context, skippedXids map[uint64]bo
 	}
 }
 
-func (m *deviceHealthMonitor) Unhealthy() <-chan *AllocatableDevice {
+func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *AllocatableDevice {
 	return m.unhealthy
 }
 
-func (m *deviceHealthMonitor) findMigDevice(parentUUID string, giID uint32, ciID uint32) *AllocatableDevice {
-	for _, device := range m.uuidToDeviceMap {
-		if device.Type() != MigDeviceType {
+func getDeviceByParentGiCiMap(allocatable AllocatableDevices) map[string]map[uint32]map[uint32]*AllocatableDevice {
+	deviceByParentGiCiMap := make(map[string]map[uint32]map[uint32]*AllocatableDevice)
+
+	for _, d := range allocatable {
+		var parentUUID string
+		var giID, ciID uint32
+
+		switch d.Type() {
+		case GpuDeviceType:
+			parentUUID = d.UUID()
+			if parentUUID == "" {
+				continue
+			}
+			giID = FullGPUInstanceID
+			ciID = FullGPUInstanceID
+		case MigDeviceType:
+			parentUUID = d.Mig.parent.UUID
+			if parentUUID == "" {
+				continue
+			}
+			giID = d.Mig.giInfo.Id
+			ciID = d.Mig.ciInfo.Id
+		default:
+			klog.Errorf("Skipping device with unknown type: %s", d.UUID())
 			continue
 		}
 
-		if device.Mig.parent.UUID == parentUUID &&
-			device.Mig.giInfo.Id == giID &&
-			device.Mig.ciInfo.Id == ciID {
-			return device
+		if _, ok := deviceByParentGiCiMap[parentUUID]; !ok {
+			deviceByParentGiCiMap[parentUUID] = make(map[uint32]map[uint32]*AllocatableDevice)
 		}
+		if _, ok := deviceByParentGiCiMap[parentUUID][giID]; !ok {
+			deviceByParentGiCiMap[parentUUID][giID] = make(map[uint32]*AllocatableDevice)
+		}
+		deviceByParentGiCiMap[parentUUID][giID][ciID] = d
 	}
-	return nil
-}
-
-func (m *deviceHealthMonitor) findGpuDevice(uuid string) *AllocatableDevice {
-	device, exists := m.uuidToDeviceMap[uuid]
-	if exists && device.Type() == GpuDeviceType {
-		return device
-	}
-	return nil
+	return deviceByParentGiCiMap
 }
 
 // getAdditionalXids returns a list of additional Xids to skip from the specified string.
@@ -264,7 +284,8 @@ func getAdditionalXids(input string) []uint64 {
 	return additionalXids
 }
 
-func (m *deviceHealthMonitor) xidsToSkip(additionalXids string) map[uint64]bool {
+// Refer https://docs.nvidia.com/deploy/xid-errors/analyzing-xid-catalog.html for information on xids.
+func (m *nvmlDeviceHealthMonitor) xidsToSkip(additionalXids string) map[uint64]bool {
 	ignoredXids := []uint64{
 		13,  // Graphics Engine Exception
 		31,  // GPU memory page fault

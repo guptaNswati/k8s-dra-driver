@@ -41,13 +41,13 @@ import (
 const DriverPrepUprepFlockFileName = "pu.lock"
 
 type driver struct {
-	client              coreclientset.Interface
-	pluginhelper        *kubeletplugin.Helper
-	state               *DeviceState
-	pulock              *flock.Flock
-	healthcheck         *healthcheck
-	deviceHealthMonitor *deviceHealthMonitor
-	wg                  sync.WaitGroup
+	client                  coreclientset.Interface
+	pluginhelper            *kubeletplugin.Helper
+	state                   *DeviceState
+	pulock                  *flock.Flock
+	healthcheck             *healthcheck
+	nvmlDeviceHealthMonitor *nvmlDeviceHealthMonitor
+	wg                      sync.WaitGroup
 }
 
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
@@ -98,12 +98,12 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	driver.healthcheck = healthcheck
 
 	if featuregates.Enabled(featuregates.DeviceHealthCheck) {
-		deviceHealthMonitor, err := newDeviceHealthMonitor(ctx, config, state.allocatable, state.nvdevlib)
+		nvmlDeviceHealthMonitor, err := newNvmlDeviceHealthMonitor(ctx, config, state.allocatable, state.nvdevlib)
 		if err != nil {
-			return nil, fmt.Errorf("start deviceHealthMonitor: %w", err)
+			return nil, fmt.Errorf("start nvmlDeviceHealthMonitor: %w", err)
 		}
 
-		driver.deviceHealthMonitor = deviceHealthMonitor
+		driver.nvmlDeviceHealthMonitor = nvmlDeviceHealthMonitor
 
 		driver.wg.Add(1)
 		go func() {
@@ -128,8 +128,8 @@ func (d *driver) Shutdown() error {
 		d.healthcheck.Stop()
 	}
 
-	if d.deviceHealthMonitor != nil {
-		d.deviceHealthMonitor.Stop()
+	if d.nvmlDeviceHealthMonitor != nil {
+		d.nvmlDeviceHealthMonitor.Stop()
 	}
 
 	d.wg.Wait()
@@ -203,13 +203,13 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimNs kubeletplugi
 }
 
 func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
-	klog.Info("Processing device health notifications")
+	klog.Info("Starting to watch for device health notifications")
 	for {
 		select {
 		case <-ctx.Done():
 			klog.V(6).Info("Stop processing device health notifications")
 			return
-		case device, ok := <-d.deviceHealthMonitor.Unhealthy():
+		case device, ok := <-d.nvmlDeviceHealthMonitor.Unhealthy():
 			if !ok {
 				klog.V(6).Info("Health monitor channel closed")
 				return
@@ -219,7 +219,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			klog.Warningf("Received unhealthy notification for device: %s", uuid)
 
 			if !device.IsHealthy() {
-				klog.V(6).Infof("Device: %s is aleady marked unhealthy. Skip republishing resourceslice", uuid)
+				klog.V(6).Infof("Device: %s is aleady marked unhealthy. Skip republishing ResourceSlice", uuid)
 				continue
 			}
 
@@ -234,15 +234,15 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 
 			// Republish resource slice with only healthy devices
 			// There is no remediation loop right now meaning if the unhealthy device is fixed,
-			// driver needs to be restarted to publish the resourceslice with all devices
+			// driver needs to be restarted to publish the ResourceSlice with all devices
 			var resourceSlice resourceslice.Slice
 			for _, dev := range d.state.allocatable {
 				uuid := dev.UUID()
 				if dev.IsHealthy() {
-					klog.V(6).Infof("Device: %s is healthy, added to resoureslice", uuid)
+					klog.V(6).Infof("Device: %s is healthy, added to ResoureSlice", uuid)
 					resourceSlice.Devices = append(resourceSlice.Devices, dev.GetDevice())
 				} else {
-					klog.Warningf("Device: %s is unhealthy, will be removed from resoureslice", uuid)
+					klog.Warningf("Device: %s is unhealthy, will be removed from ResoureSlice", uuid)
 				}
 			}
 
