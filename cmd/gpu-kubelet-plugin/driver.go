@@ -211,7 +211,8 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			return
 		case device, ok := <-d.nvmlDeviceHealthMonitor.Unhealthy():
 			if !ok {
-				klog.V(6).Info("Health monitor channel closed")
+				// nvmlDeviceHealthMonitor is expected to close only during driver Shutdown.
+				klog.Info("Health monitor channel closed")
 				return
 			}
 			uuid := device.UUID()

@@ -296,6 +296,12 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		if !exists {
 			return nil, fmt.Errorf("requested device is not allocatable: %v", result.Device)
 		}
+		// only proceed with config mapping if device is healthy.
+		if featuregates.Enabled(featuregates.DeviceHealthCheck) {
+			if device.Health == Unhealthy {
+				return nil, fmt.Errorf("requested device is not healthy: %v", result.Device)
+			}
+		}
 		for _, c := range slices.Backward(configs) {
 			if slices.Contains(c.Requests, result.Request) {
 				if _, ok := c.Config.(*configapi.GpuConfig); ok && device.Type() != GpuDeviceType {
