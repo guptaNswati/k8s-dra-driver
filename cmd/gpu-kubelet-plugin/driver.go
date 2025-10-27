@@ -224,12 +224,6 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 				continue
 			}
 
-			release, err := d.pulock.Acquire(ctx, flock.WithTimeout(10*time.Second))
-			if err != nil {
-				klog.Errorf("error acquiring prep/unprep lock for health status update: %v", err)
-				continue
-			}
-
 			// Mark device as unhealthy.
 			d.state.UpdateDeviceHealthStatus(device, Unhealthy)
 
@@ -257,10 +251,8 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			if err := d.pluginhelper.PublishResources(ctx, resources); err != nil {
 				klog.Errorf("Failed to publish resources after device health status update: %v", err)
 			} else {
-				klog.V(6).Info("Successfully republished resources without unhealthy device")
+				klog.Info("Successfully republished resources without unhealthy device")
 			}
-
-			release()
 		}
 	}
 }

@@ -170,9 +170,7 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context, skippedXids map[uint6
 			}
 			if ret != nvml.SUCCESS {
 				klog.Infof("Error waiting for event: %v; Marking all devices as unhealthy", ret)
-				for _, dev := range m.uuidToDeviceMap {
-					m.unhealthy <- dev
-				}
+				m.markAllDevicesUnhealthy()
 				continue
 			}
 
@@ -190,9 +188,7 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context, skippedXids map[uint6
 			eventUUID, ret := event.Device.GetUUID()
 			if ret != nvml.SUCCESS {
 				klog.Infof("Failed to determine uuid for event %v: %v; Marking all devices as unhealthy.", event, ret)
-				for _, dev := range m.uuidToDeviceMap {
-					m.unhealthy <- dev
-				}
+				m.markAllDevicesUnhealthy()
 				continue
 			}
 
@@ -220,6 +216,17 @@ func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *AllocatableDevice {
 	return m.unhealthy
 }
 
+func (m *nvmlDeviceHealthMonitor) markAllDevicesUnhealthy() {
+	for _, d := range m.uuidToDeviceMap {
+		// non-blocking send.
+		select {
+		case m.unhealthy <- d:
+		default:
+			klog.Errorf("Unhealthy channel buffer full. Dropping unhealthy notification for device %s in markAllDevicesUnhealthy.", d.UUID())
+		}
+	}
+}
+
 func getDeviceByParentGiCiMap(allocatable AllocatableDevices) map[string]map[uint32]map[uint32]*AllocatableDevice {
 	deviceByParentGiCiMap := make(map[string]map[uint32]map[uint32]*AllocatableDevice)
 
@@ -243,7 +250,7 @@ func getDeviceByParentGiCiMap(allocatable AllocatableDevices) map[string]map[uin
 			giID = d.Mig.giInfo.Id
 			ciID = d.Mig.ciInfo.Id
 		default:
-			klog.Errorf("Skipping device with unknown type: %s", d.UUID())
+			klog.Errorf("Skipping device with unknown type: %s", d.Type())
 			continue
 		}
 
