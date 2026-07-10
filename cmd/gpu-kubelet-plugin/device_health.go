@@ -100,6 +100,19 @@ func healthEventToTaint(monitor deviceHealthMonitor, event *DeviceHealthEvent) *
 // For a full device the returned 3-tuple is the device's uuid and (FullGPUInstanceID) 0xFFFFFFFF for the other two elements.
 type devicePlacementMap map[string]map[uint32]map[uint32]*AllocatableDevice
 
+// devicePlacementRegistry tracks live (parentUUID, GI, CI) -> allocatable device
+// mappings for dynamically created MIG partitions. Static MIG and full GPU
+// entries are populated at monitor startup; dynamic MIG entries are added and
+// removed at prepare/unprepare time.
+type devicePlacementRegistry interface {
+	RegisterDevicePlacement(parentUUID string, gi, ci uint32, dev *AllocatableDevice)
+	UnregisterDevicePlacement(parentUUID string, gi, ci uint32)
+}
+
+type migDeviceResolver interface {
+	FindMigDevBySpec(*MigSpecTuple) (*MigLiveTuple, error)
+}
+
 type nvmlDeviceHealthMonitor struct {
 	nvmllib           nvml.Interface
 	eventSet          nvml.EventSet
@@ -107,6 +120,11 @@ type nvmlDeviceHealthMonitor struct {
 	deviceByPlacement devicePlacementMap
 	skippedXids       map[uint64]bool
 	wg                sync.WaitGroup
+	placementMu       sync.RWMutex
+	// allocatableByParent is the immutable inventory of all advertised devices
+	// grouped by physical GPU. Unlike deviceByPlacement, it includes dynamic MIG
+	// devices which have not yet been prepared.
+	allocatableByParent map[string][]*AllocatableDevice
 }
 
 func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocatableDevices, nvdevlib *deviceLib) (*nvmlDeviceHealthMonitor, error) {
@@ -124,16 +142,18 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 		return nil, fmt.Errorf("perGPUAllocatable is nil")
 	}
 	all := perGPUAllocatable.GetAllDevices()
+	placementMap := getDevicePlacementMap(all)
 	m := &nvmlDeviceHealthMonitor{
-		nvmllib:           nvdevlib.nvmllib,
-		unhealthy:         make(chan *DeviceHealthEvent, len(all)),
-		deviceByPlacement: getDevicePlacementMap(all),
-		skippedXids:       xidsToSkip(config.flags.additionalXidsToIgnore),
+		nvmllib:             nvdevlib.nvmllib,
+		unhealthy:           make(chan *DeviceHealthEvent, len(all)),
+		deviceByPlacement:   placementMap,
+		allocatableByParent: getAllocatableByParent(all),
+		skippedXids:         xidsToSkip(config.flags.additionalXidsToIgnore),
 	}
 	return m, nil
 }
 
-func (m *nvmlDeviceHealthMonitor) Start(ctx context.Context) (rerr error) {
+func (m *nvmlDeviceHealthMonitor) RegisterEvents() (rerr error) {
 	if ret := m.nvmllib.Init(); ret != nvml.SUCCESS {
 		return fmt.Errorf("failed to initialize NVML: %v", ret)
 	}
@@ -154,7 +174,13 @@ func (m *nvmlDeviceHealthMonitor) Start(ctx context.Context) (rerr error) {
 
 	klog.V(4).Info("registering NVML events for device health monitor")
 	m.registerEventsForDevices()
+	return nil
+}
 
+func (m *nvmlDeviceHealthMonitor) Start(ctx context.Context) error {
+	if m.eventSet == nil {
+		return fmt.Errorf("NVML events have not been registered")
+	}
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -165,31 +191,35 @@ func (m *nvmlDeviceHealthMonitor) Start(ctx context.Context) (rerr error) {
 	return nil
 }
 
+// registerEventsForDevices registers NVML events once per physical GPU. NVML
+// (XID) events are delivered at the physical-GPU level (with GI/CI fields on
+// the event for MIG), so registration is on the parent GPU handle and covers
+// all of its (static or dynamic) partitions.
 func (m *nvmlDeviceHealthMonitor) registerEventsForDevices() {
 	eventMask := uint64(nvml.EventTypeXidCriticalError | nvml.EventTypeDoubleBitEccError | nvml.EventTypeSingleBitEccError)
 
-	for parentUUID, giMap := range m.deviceByPlacement {
+	for parentUUID, devices := range m.allocatableByParent {
 		gpu, ret := m.nvmllib.DeviceGetHandleByUUID(parentUUID)
 		if ret != nvml.SUCCESS {
 			klog.Warningf("Unable to get device handle from UUID[%s]: %v; marking devices as unmonitored", parentUUID, ret)
-			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
+			m.sendBatchedHealthEvent(devices, HealthEventUnmonitored)
 			continue
 		}
 
 		supportedEvents, ret := gpu.GetSupportedEventTypes()
 		if ret != nvml.SUCCESS {
 			klog.Warningf("unable to determine the supported events for %s: %v; marking devices as unmonitored", parentUUID, ret)
-			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
+			m.sendBatchedHealthEvent(devices, HealthEventUnmonitored)
 			continue
 		}
 
 		ret = gpu.RegisterEvents(eventMask&supportedEvents, m.eventSet)
 		if ret == nvml.ERROR_NOT_SUPPORTED {
 			klog.Warningf("Device %v is too old to support healthchecking.", parentUUID)
-			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
+			m.sendBatchedHealthEvent(devices, HealthEventUnmonitored)
 		} else if ret != nvml.SUCCESS {
 			klog.Warningf("unable to register events for %s: %v; marking devices as unmonitored", parentUUID, ret)
-			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
+			m.sendBatchedHealthEvent(devices, HealthEventUnmonitored)
 		}
 	}
 }
@@ -255,13 +285,13 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				m.sendHealthEventForAllDevices(HealthEventGPULost)
 				continue
 			}
-			affectedDevice := m.deviceByPlacement.get(eventUUID, gi, ci)
+			affectedDevice := m.lookupDevicePlacement(eventUUID, gi, ci)
 			if affectedDevice == nil {
 				klog.V(6).Infof("Ignoring event for unexpected device (UUID:%s, GI:%d, CI:%d)", eventUUID, gi, ci)
 				continue
 			}
 
-			klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.UUID())
+			klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.CanonicalName())
 			m.unhealthy <- &DeviceHealthEvent{
 				Devices:   []*AllocatableDevice{affectedDevice},
 				EventType: HealthEventXID,
@@ -280,45 +310,21 @@ func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *DeviceHealthEvent {
 // update.
 func (m *nvmlDeviceHealthMonitor) sendHealthEventForAllDevices(eventType DeviceHealthEventType) {
 	var devices []*AllocatableDevice
-	for _, giMap := range m.deviceByPlacement {
-		devices = append(devices, flattenMIGDeviceMap(giMap)...)
+	for _, parentDevices := range m.allocatableByParent {
+		devices = append(devices, parentDevices...)
 	}
 	m.sendBatchedHealthEvent(devices, eventType)
 }
 
-// sendHealthEventForDevices aggregates all devices under a single parent GPU
-// into one batched DeviceHealthEvent.
-func (m *nvmlDeviceHealthMonitor) sendHealthEventForDevices(giMap map[uint32]map[uint32]*AllocatableDevice, eventType DeviceHealthEventType) {
-	m.sendBatchedHealthEvent(flattenMIGDeviceMap(giMap), eventType)
-}
-
-// flattenMIGDeviceMap flattens a GI→CI device map into a slice.
-func flattenMIGDeviceMap(giMap map[uint32]map[uint32]*AllocatableDevice) []*AllocatableDevice {
-	var devices []*AllocatableDevice
-	for _, ciMap := range giMap {
-		for _, dev := range ciMap {
-			devices = append(devices, dev)
-		}
-	}
-	return devices
-}
-
 // sendBatchedHealthEvent sends a single DeviceHealthEvent containing all
-// affected devices. Uses a non-blocking send to protect the monitor goroutine
-// from deadlocks when the channel is full.
+// affected devices.
 func (m *nvmlDeviceHealthMonitor) sendBatchedHealthEvent(devices []*AllocatableDevice, eventType DeviceHealthEventType) {
 	if len(devices) == 0 {
 		return
 	}
-	event := &DeviceHealthEvent{
+	m.unhealthy <- &DeviceHealthEvent{
 		Devices:   devices,
 		EventType: eventType,
-	}
-	select {
-	case m.unhealthy <- event:
-		klog.V(6).Infof("Sent batched %s health event for %d device(s)", eventType, len(devices))
-	default:
-		klog.Errorf("Health event channel full; dropping batched %s event for %d device(s)", eventType, len(devices))
 	}
 }
 
@@ -446,4 +452,164 @@ func (m *nvmlDeviceHealthMonitor) IsEventNonFatal(event *DeviceHealthEvent) bool
 		return m.skippedXids[event.EventData]
 	}
 	return false
+}
+
+func getAllocatableByParent(allocatable AllocatableDevices) map[string][]*AllocatableDevice {
+	byParent := make(map[string][]*AllocatableDevice)
+	for _, d := range allocatable {
+		var parentUUID string
+		switch d.Type() {
+		case GpuDeviceType:
+			parentUUID = d.Gpu.UUID
+		case MigStaticDeviceType:
+			parentUUID = d.MigStatic.parent.UUID
+		case MigDynamicDeviceType:
+			parentUUID = d.MigDynamic.Parent.UUID
+		default:
+			continue
+		}
+		if parentUUID == "" {
+			continue
+		}
+		byParent[parentUUID] = append(byParent[parentUUID], d)
+	}
+	return byParent
+}
+
+func (m *nvmlDeviceHealthMonitor) RegisterDevicePlacement(parentUUID string, gi, ci uint32, dev *AllocatableDevice) {
+	if m == nil || dev == nil || parentUUID == "" {
+		return
+	}
+	m.placementMu.Lock()
+	defer m.placementMu.Unlock()
+	m.deviceByPlacement.addDevice(parentUUID, gi, ci, dev)
+}
+
+func (m *nvmlDeviceHealthMonitor) UnregisterDevicePlacement(parentUUID string, gi, ci uint32) {
+	if m == nil || parentUUID == "" {
+		return
+	}
+	m.placementMu.Lock()
+	defer m.placementMu.Unlock()
+	giMap, ok := m.deviceByPlacement[parentUUID]
+	if !ok {
+		return
+	}
+	ciMap, ok := giMap[gi]
+	if !ok {
+		return
+	}
+	delete(ciMap, ci)
+	if len(ciMap) == 0 {
+		delete(giMap, gi)
+	}
+	if len(giMap) == 0 {
+		delete(m.deviceByPlacement, parentUUID)
+	}
+}
+
+func (m *nvmlDeviceHealthMonitor) lookupDevicePlacement(parentUUID string, gi, ci uint32) *AllocatableDevice {
+	m.placementMu.RLock()
+	defer m.placementMu.RUnlock()
+	return m.deviceByPlacement.get(parentUUID, gi, ci)
+}
+
+func rebuildHealthPlacementsFromCheckpoint(registry devicePlacementRegistry, resolver migDeviceResolver, perGPU *PerGPUAllocatableDevices, cp *Checkpoint) error {
+	if registry == nil || cp == nil || cp.V2 == nil {
+		return nil
+	}
+	if resolver == nil {
+		return fmt.Errorf("MIG device resolver is nil")
+	}
+	if perGPU == nil {
+		return fmt.Errorf("per-GPU allocatable device inventory is nil")
+	}
+
+	type placement struct {
+		parentUUID string
+		gi         uint32
+		ci         uint32
+		device     *AllocatableDevice
+	}
+	type incarnationKey struct {
+		parentUUID string
+		gi         int
+		ci         int
+		migUUID    string
+	}
+
+	var placements []placement
+	owners := make(map[incarnationKey]string)
+	for claimUID, pc := range cp.V2.PreparedClaims {
+		if pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+			continue
+		}
+		for _, group := range pc.PreparedDevices {
+			for _, pd := range group.Devices {
+				if pd.Mig == nil {
+					continue
+				}
+				if pd.Mig.Concrete == nil || pd.Mig.Device == nil {
+					return fmt.Errorf("completed claim %s has incomplete MIG checkpoint data", claimUID)
+				}
+				allocatable := perGPU.GetAllocatableDevice(DeviceName(pd.Mig.Device.DeviceName))
+				if allocatable == nil {
+					return fmt.Errorf("completed claim %s references device %s but no allocatable device was found",
+						claimUID, pd.Mig.Device.DeviceName)
+				}
+				if allocatable.Type() != MigDynamicDeviceType {
+					continue
+				}
+
+				live, err := resolver.FindMigDevBySpec(allocatable.MigDynamic.Tuple())
+				if err != nil {
+					return fmt.Errorf("resolve live MIG device for completed claim %s (%s): %w",
+						claimUID, pd.Mig.Device.DeviceName, err)
+				}
+				if live == nil {
+					return fmt.Errorf("live MIG device for completed claim %s (%s) is missing",
+						claimUID, pd.Mig.Device.DeviceName)
+				}
+				if err := validateMigIncarnation(pd.Mig.Concrete, live); err != nil {
+					return fmt.Errorf("completed claim %s (%s): %w",
+						claimUID, pd.Mig.Device.DeviceName, err)
+				}
+
+				key := incarnationKey{live.ParentUUID, live.GIID, live.CIID, live.MigUUID}
+				if owner, exists := owners[key]; exists {
+					return fmt.Errorf("completed claims %s and %s resolve to the same live MIG device %s at parentUUID=%s GI=%d CI=%d",
+						owner, claimUID, live.MigUUID, live.ParentUUID, live.GIID, live.CIID)
+				}
+				owners[key] = claimUID
+				placements = append(placements, placement{
+					parentUUID: live.ParentUUID,
+					gi:         uint32(live.GIID),
+					ci:         uint32(live.CIID),
+					device:     allocatable,
+				})
+			}
+		}
+	}
+
+	for _, p := range placements {
+		registry.RegisterDevicePlacement(p.parentUUID, p.gi, p.ci, p.device)
+	}
+	return nil
+}
+
+func validateMigIncarnation(expected, live *MigLiveTuple) error {
+	if expected == nil || live == nil {
+		return fmt.Errorf("cannot validate nil MIG incarnation (expected=%v live=%v)", expected != nil, live != nil)
+	}
+	if expected.ParentUUID != live.ParentUUID ||
+		expected.GIID != live.GIID ||
+		expected.CIID != live.CIID ||
+		expected.MigUUID != live.MigUUID {
+		return fmt.Errorf(
+			"MIG incarnation mismatch: expected parentUUID=%s GI=%d CI=%d migUUID=%s, got parentUUID=%s GI=%d CI=%d migUUID=%s",
+			expected.ParentUUID, expected.GIID, expected.CIID, expected.MigUUID,
+			live.ParentUUID, live.GIID, live.CIID, live.MigUUID,
+		)
+	}
+	return nil
 }

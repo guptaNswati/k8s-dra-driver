@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
@@ -54,10 +55,11 @@ type AllocatableDevice struct {
 	// taints holds DRA device taints set by the health monitor. Published
 	// as part of the device's ResourceSlice entry so the scheduler and
 	// kubelet honour them per KEP-5055.
-	taints []resourceapi.DeviceTaint
+	taintsMu sync.RWMutex
+	taints   []resourceapi.DeviceTaint
 }
 
-func (d AllocatableDevice) Type() string {
+func (d *AllocatableDevice) Type() string {
 	if d.Gpu != nil {
 		return GpuDeviceType
 	}
@@ -73,7 +75,7 @@ func (d AllocatableDevice) Type() string {
 	return UnknownDeviceType
 }
 
-func (d AllocatableDevice) IsStaticOrDynMigDevice() bool {
+func (d *AllocatableDevice) IsStaticOrDynMigDevice() bool {
 	switch d.Type() {
 	case MigStaticDeviceType, MigDynamicDeviceType:
 		return true
@@ -115,7 +117,7 @@ func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 // allocatable devices are abstract devices that do not have a UUID before
 // actualization -- hence, the idea of `AllocatableDevices` implementing
 // UUIDProvider is brittle.
-func (d AllocatableDevice) UUID() string {
+func (d *AllocatableDevice) UUID() string {
 	if d.Gpu != nil {
 		return d.Gpu.UUID
 	}
@@ -317,6 +319,8 @@ func (d *PerGPUAllocatableDevices) RemoveSiblingDevices(device *AllocatableDevic
 // Taints returns a copy of the device's taints to prevent data races
 // when being read concurrently by the ResourceSlice builder.
 func (d *AllocatableDevice) Taints() []resourceapi.DeviceTaint {
+	d.taintsMu.RLock()
+	defer d.taintsMu.RUnlock()
 	return slices.Clone(d.taints)
 }
 
@@ -326,6 +330,8 @@ func (d *AllocatableDevice) Taints() []resourceapi.DeviceTaint {
 // (e.g., XID 48 followed by XID 63), the value is overwritten and only the most recent event data is retained.
 // Returns true if the taint set was modified.
 func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) bool {
+	d.taintsMu.Lock()
+	defer d.taintsMu.Unlock()
 	for i, existing := range d.taints {
 		if existing.Key == taint.Key {
 

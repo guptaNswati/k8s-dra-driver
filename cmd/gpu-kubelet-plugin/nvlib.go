@@ -1045,6 +1045,12 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting UUID from CI info/device for CI %d: %v", ciInfo.Id, ret)
 	}
+	uuid, err = resolveCreatedMigUUID(uuid, gpu.UUID, int(giInfo.Id), int(ciInfo.Id), func() (*MigLiveTuple, error) {
+		return l.FindMigDevBySpec(migspec.Tuple())
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	// This now probably needs consolidation with the new types MigLiveTuple and
 	// MigSpecTuple. Things get confusing.
@@ -1065,6 +1071,32 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 
 	klog.V(6).Infof("%s: MIG device created on %s: %+v", logpfx, gpu.String(), migDevInfo.LiveTuple())
 	return migDevInfo, nil
+}
+
+func resolveCreatedMigUUID(candidateUUID, parentUUID string, expectedGI, expectedCI int, findLive func() (*MigLiveTuple, error)) (string, error) {
+	if candidateUUID != parentUUID {
+		return candidateUUID, nil
+	}
+
+	// Some drivers return the parent GPU handle in ComputeInstanceInfo.Device.
+	// In that case GetUUID() yields GPU-... instead of the MIG incarnation UUID.
+	// Resolve the just-created profile/placement through the existing discovery
+	// path and verify that it is the same GI/CI before checkpointing.
+	live, err := findLive()
+	if err != nil {
+		return "", fmt.Errorf("resolve UUID for newly created MIG device: %w", err)
+	}
+	if live == nil {
+		return "", fmt.Errorf("newly created MIG device was not found by profile and placement")
+	}
+	if live.GIID != expectedGI || live.CIID != expectedCI {
+		return "", fmt.Errorf("newly created MIG tuple mismatch: expected GI=%d CI=%d, got GI=%d CI=%d",
+			expectedGI, expectedCI, live.GIID, live.CIID)
+	}
+	if live.MigUUID == "" || live.MigUUID == parentUUID {
+		return "", fmt.Errorf("newly created MIG device has invalid UUID %q", live.MigUUID)
+	}
+	return live.MigUUID, nil
 }
 
 // Assume long-lived NVML session.
@@ -1114,21 +1146,6 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// Remainder, with `gi` actually being valid.
 	ci, cires := gi.GetComputeInstanceById(ciId)
 
-	// Here we could compare the actual MIG UUID with an expected MIG UUID,
-	// to be extra sure that this we want to proceed with deletion.
-	// ciInfo, res := ci.GetInfo()
-	// if res != nvml.SUCCESS {
-	// 	return fmt.Errorf("error calling ci.GetInfo(): %v", ret)
-	// }
-
-	// actualMigUUID, res := nvml.DeviceGetUUID(ciInfo.Device)
-	// if res != nvml.SUCCESS {
-	// 	return fmt.Errorf("nvml.DeviceGetUUID() failed: %v", ret)
-	// }
-	// if actualMigUUID != expectedMigUUID {
-	// 	return fmt.Errorf("UUID mismatch upon deletion: expected: %s actual: %s", expectedMigUUID, actualMigUUID)
-	// }
-
 	// Can never be `ERROR_NOT_SUPPORTED` at this point. Can be UNINITIALIZED,
 	// INVALID_ARGUMENT, NO_PERMISSION: for those three, it's worth erroring out
 	// here (to be retried later).
@@ -1136,11 +1153,29 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 		return fmt.Errorf("error getting Compute instance handle for MIG device %s: %v", migStr, ret)
 	}
 
-	// A previous, partial cleanup may actually have already deleted that. Seen
-	// in practice. Ignore, and proceed with deleting GPU instance below.
+	// A previous partial cleanup may already have deleted the CI. Only continue
+	// when no concrete UUID was checkpointed; a completed device with a UUID
+	// must fail closed instead of deleting a potentially reused GI tuple.
 	if cires == nvml.ERROR_NOT_FOUND {
+		if miglt.MigUUID != "" {
+			return fmt.Errorf("refusing to delete %s: expected compute instance UUID %s was not found", migStr, miglt.MigUUID)
+		}
 		klog.Infof("Delete %s: CI not found, ignore", migStr)
 	} else {
+		if miglt.MigUUID != "" {
+			ciInfo, ret := ci.GetInfo()
+			if ret != nvml.SUCCESS {
+				return fmt.Errorf("error getting Compute instance info for %s: %v", migStr, ret)
+			}
+			actualMigUUID, ret := ciInfo.Device.GetUUID()
+			if ret != nvml.SUCCESS {
+				return fmt.Errorf("error getting live MIG UUID for %s: %v", migStr, ret)
+			}
+			if actualMigUUID != miglt.MigUUID {
+				return fmt.Errorf("refusing to delete reused MIG tuple parentUUID=%s GI=%d CI=%d: expected UUID %s, got %s",
+					parentUUID, giId, ciId, miglt.MigUUID, actualMigUUID)
+			}
+		}
 		ret := ci.Destroy()
 		if ret != nvml.SUCCESS {
 			return fmt.Errorf("error destroying Compute instance: %v", ret)

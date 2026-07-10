@@ -128,6 +128,38 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		useSplitResourceSlices: useSplitSlices,
 	}
 
+	// Create the health monitor and wire the placement registry before
+	// kubeletplugin.Start(). Start() brings the Prepare/Unprepare gRPC server
+	// online immediately; if a Prepare runs before the registry is set, dynamic
+	// MIG placements are silently dropped and XID events are ignored.
+	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
+		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)
+		}
+		driver.deviceHealthMonitor = deviceHealthMonitor
+		state.SetHealthPlacementRegistry(deviceHealthMonitor)
+
+		// Restore concrete dynamic MIG placements before either the NVML event
+		// loop or the kubelet Prepare/Unprepare server can observe them.
+		if featuregates.Enabled(featuregates.DynamicMIG) {
+			cp, err := state.getCheckpoint(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read checkpoint for health placement rebuild: %w", err)
+			}
+			if err := rebuildHealthPlacementsFromCheckpoint(deviceHealthMonitor, state.nvdevlib, state.perGPUAllocatable, cp); err != nil {
+				return nil, fmt.Errorf("failed to rebuild health placements from checkpoint: %w", err)
+			}
+		}
+
+		// Start recording parent GPU events before the kubelet server can
+		// accept Prepare requests. NVML retains recorded events until the wait
+		// loop starts after the kubelet helper is available.
+		if err := deviceHealthMonitor.RegisterEvents(); err != nil {
+			return nil, fmt.Errorf("failed to register NVML device events: %w", err)
+		}
+	}
+
 	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(driver.client),
 		kubeletplugin.NodeName(config.flags.nodeName),
@@ -155,14 +187,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	driver.healthcheck = healthcheck
 
 	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
-		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)
-		}
-		if err := deviceHealthMonitor.Start(ctx); err != nil {
+		if err := driver.deviceHealthMonitor.Start(ctx); err != nil {
 			return nil, fmt.Errorf("failed to start device health monitor: %w", err)
 		}
-		driver.deviceHealthMonitor = deviceHealthMonitor
 
 		driver.wg.Add(1)
 		go func() {
@@ -510,7 +537,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			taint := healthEventToTaint(d.deviceHealthMonitor, event)
 			modified := false
 			for _, dev := range event.Devices {
-				klog.Warningf("Received %s health event for device %s", event.EventType, dev.UUID())
+				klog.Warningf("Received %s health event for device %s", event.EventType, dev.CanonicalName())
 				if d.state.AddDeviceTaint(dev, taint) {
 					modified = true
 				}
@@ -519,16 +546,24 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 				continue
 			}
 
-			var resourceSlice resourceslice.Slice
-			for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
-				for _, dev := range devices {
-					d := dev.GetDevice()
-
-					taints := dev.Taints()
-					if len(taints) > 0 {
-						d.Taints = taints
+			var resources resourceslice.DriverResources
+			if featuregates.Enabled(featuregates.DynamicMIG) {
+				resources = d.GenerateDriverResources(nodeName)
+			} else {
+				var resourceSlice resourceslice.Slice
+				for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
+					for _, dev := range devices {
+						apiDev := dev.GetDevice()
+						if taints := dev.Taints(); len(taints) > 0 {
+							apiDev.Taints = taints
+						}
+						resourceSlice.Devices = append(resourceSlice.Devices, apiDev)
 					}
-					resourceSlice.Devices = append(resourceSlice.Devices, d)
+				}
+				resources = resourceslice.DriverResources{
+					Pools: map[string]resourceslice.Pool{
+						nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
+					},
 				}
 			}
 
@@ -543,14 +578,8 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			// This is a temporary compromise while device taints/tolerations (KEP-5055)
 			// are available as a Beta feature. An interim improvement could be adding
 			// a retry/backoff or switch to patch updates instead of full republish.
-			klog.V(4).Infof("Republishing ResourceSlice: %d device(s) tainted with %s=%q (effect=%s)",
+			klog.V(2).Infof("health: republishing ResourceSlice: %d device(s) tainted with %s=%q (effect=%s)",
 				len(event.Devices), taint.Key, taint.Value, taint.Effect)
-
-			resources := resourceslice.DriverResources{
-				Pools: map[string]resourceslice.Pool{
-					nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
-				},
-			}
 
 			// NOTE: GPU_LOST and unmonitored events are already batched at the
 			// sender (all affected devices arrive in a single DeviceHealthEvent).

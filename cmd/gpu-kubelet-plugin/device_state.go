@@ -79,6 +79,8 @@ type DeviceState struct {
 	nvdevlib          *deviceLib
 	checkpointManager checkpointmanager.CheckpointManager
 
+	healthPlacementRegistry devicePlacementRegistry
+
 	// Checkpoint read/write lock, file-based for multi-process synchronization.
 	cplock *flock.Flock
 }
@@ -877,6 +879,8 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 					Concrete: migdev.LiveTuple(),
 					Device:   device,
 				}
+				lt := migdev.LiveTuple()
+				s.registerHealthPlacement(lt.ParentUUID, lt.GIID, lt.CIID, allocatableDevice)
 			case VfioDeviceType:
 				preparedDevice.Vfio = &PreparedVfioDevice{
 					Info:   allocatableDevice.Vfio,
@@ -931,6 +935,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 						klog.Warningf("Error deleting MIG device %s: %s", device.Mig.Device.DeviceName, err)
 						return fmt.Errorf("error deleting MIG device %s: %w", device.Mig.Device.DeviceName, err)
 					}
+					s.unregisterHealthPlacement(mig)
 				} else {
 					klog.V(4).Infof("Unprepare: static MIG: noop (MIG %s)", device.Mig.Concrete.MigUUID)
 				}
@@ -1284,6 +1289,7 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 	if err := s.nvdevlib.deleteMigDevice(mlt); err != nil {
 		return fmt.Errorf("MIG device deletion failed: %w", err)
 	}
+	s.unregisterHealthPlacement(mlt)
 
 	return nil
 }
@@ -1317,6 +1323,29 @@ func syncPreparedDevicesGaugeFromCheckpoint(nodeName string, cp *Checkpoint) {
 			drametrics.SetPreparedDevicesCounts(nodeName, DriverName, dt, count)
 		}
 	}
+}
+
+func (s *DeviceState) SetHealthPlacementRegistry(registry devicePlacementRegistry) {
+	s.healthPlacementRegistry = registry
+	klog.V(2).Infof("health: placement registry ready")
+}
+
+func (s *DeviceState) registerHealthPlacement(parentUUID string, gi, ci int, dev *AllocatableDevice) {
+	if s.healthPlacementRegistry == nil {
+		return
+	}
+	if dev == nil || parentUUID == "" {
+		klog.Warningf("health: placement registration skipped (dev=%v parentUUID=%q)", dev != nil, parentUUID)
+		return
+	}
+	s.healthPlacementRegistry.RegisterDevicePlacement(parentUUID, uint32(gi), uint32(ci), dev)
+}
+
+func (s *DeviceState) unregisterHealthPlacement(concrete *MigLiveTuple) {
+	if s.healthPlacementRegistry == nil || concrete == nil || concrete.ParentUUID == "" {
+		return
+	}
+	s.healthPlacementRegistry.UnregisterDevicePlacement(concrete.ParentUUID, uint32(concrete.GIID), uint32(concrete.CIID))
 }
 
 // AddDeviceTaint adds or updates a DRA device taint on the given device under
