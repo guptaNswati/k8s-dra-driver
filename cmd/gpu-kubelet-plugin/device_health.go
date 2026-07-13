@@ -109,6 +109,8 @@ type devicePlacementRegistry interface {
 	UnregisterDevicePlacement(parentUUID string, gi, ci uint32)
 }
 
+// migDeviceResolver finds the concrete MIG device currently implementing an
+// abstract Dynamic MIG profile and placement.
 type migDeviceResolver interface {
 	FindMigDevBySpec(*MigSpecTuple) (*MigLiveTuple, error)
 }
@@ -153,6 +155,9 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 	return m, nil
 }
 
+// RegisterEvents creates the NVML event set and starts recording events for
+// every physical parent GPU. It intentionally does not start the wait loop, so
+// registration can complete before the kubelet server accepts requests.
 func (m *nvmlDeviceHealthMonitor) RegisterEvents() (rerr error) {
 	if ret := m.nvmllib.Init(); ret != nvml.SUCCESS {
 		return fmt.Errorf("failed to initialize NVML: %v", ret)
@@ -177,6 +182,7 @@ func (m *nvmlDeviceHealthMonitor) RegisterEvents() (rerr error) {
 	return nil
 }
 
+// Start launches the NVML event wait loop after RegisterEvents has completed.
 func (m *nvmlDeviceHealthMonitor) Start(ctx context.Context) error {
 	if m.eventSet == nil {
 		return fmt.Errorf("NVML events have not been registered")
@@ -514,6 +520,10 @@ func (m *nvmlDeviceHealthMonitor) lookupDevicePlacement(parentUUID string, gi, c
 	return m.deviceByPlacement.get(parentUUID, gi, ci)
 }
 
+// rebuildHealthPlacementsFromCheckpoint validates every completed Dynamic MIG
+// claim against live NVML state before registering any placement. Validation is
+// fail-closed: no checkpoint data is rewritten and no replacement device is
+// adopted when profile, placement, tuple, or MIG UUID differs.
 func rebuildHealthPlacementsFromCheckpoint(registry devicePlacementRegistry, resolver migDeviceResolver, perGPU *PerGPUAllocatableDevices, cp *Checkpoint) error {
 	if registry == nil || cp == nil || cp.V2 == nil {
 		return nil
@@ -531,7 +541,7 @@ func rebuildHealthPlacementsFromCheckpoint(registry devicePlacementRegistry, res
 		ci         uint32
 		device     *AllocatableDevice
 	}
-	type incarnationKey struct {
+	type migIdentityKey struct {
 		parentUUID string
 		gi         int
 		ci         int
@@ -539,7 +549,7 @@ func rebuildHealthPlacementsFromCheckpoint(registry devicePlacementRegistry, res
 	}
 
 	var placements []placement
-	owners := make(map[incarnationKey]string)
+	owners := make(map[migIdentityKey]string)
 	for claimUID, pc := range cp.V2.PreparedClaims {
 		if pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
 			continue
@@ -570,12 +580,12 @@ func rebuildHealthPlacementsFromCheckpoint(registry devicePlacementRegistry, res
 					return fmt.Errorf("live MIG device for completed claim %s (%s) is missing",
 						claimUID, pd.Mig.Device.DeviceName)
 				}
-				if err := validateMigIncarnation(pd.Mig.Concrete, live); err != nil {
+				if err := validateMigIdentity(pd.Mig.Concrete, live); err != nil {
 					return fmt.Errorf("completed claim %s (%s): %w",
 						claimUID, pd.Mig.Device.DeviceName, err)
 				}
 
-				key := incarnationKey{live.ParentUUID, live.GIID, live.CIID, live.MigUUID}
+				key := migIdentityKey{live.ParentUUID, live.GIID, live.CIID, live.MigUUID}
 				if owner, exists := owners[key]; exists {
 					return fmt.Errorf("completed claims %s and %s resolve to the same live MIG device %s at parentUUID=%s GI=%d CI=%d",
 						owner, claimUID, live.MigUUID, live.ParentUUID, live.GIID, live.CIID)
@@ -597,16 +607,18 @@ func rebuildHealthPlacementsFromCheckpoint(registry devicePlacementRegistry, res
 	return nil
 }
 
-func validateMigIncarnation(expected, live *MigLiveTuple) error {
+// validateMigIdentity requires the live device to match the checkpoint's
+// physical parent, GI, CI, and MIG UUID exactly.
+func validateMigIdentity(expected, live *MigLiveTuple) error {
 	if expected == nil || live == nil {
-		return fmt.Errorf("cannot validate nil MIG incarnation (expected=%v live=%v)", expected != nil, live != nil)
+		return fmt.Errorf("cannot validate nil MIG identity (expected=%v live=%v)", expected != nil, live != nil)
 	}
 	if expected.ParentUUID != live.ParentUUID ||
 		expected.GIID != live.GIID ||
 		expected.CIID != live.CIID ||
 		expected.MigUUID != live.MigUUID {
 		return fmt.Errorf(
-			"MIG incarnation mismatch: expected parentUUID=%s GI=%d CI=%d migUUID=%s, got parentUUID=%s GI=%d CI=%d migUUID=%s",
+			"MIG identity mismatch: expected parentUUID=%s GI=%d CI=%d migUUID=%s, got parentUUID=%s GI=%d CI=%d migUUID=%s",
 			expected.ParentUUID, expected.GIID, expected.CIID, expected.MigUUID,
 			live.ParentUUID, live.GIID, live.CIID, live.MigUUID,
 		)

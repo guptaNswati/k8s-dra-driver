@@ -1073,15 +1073,16 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	return migDevInfo, nil
 }
 
+// resolveCreatedMigUUID returns the concrete MIG UUID for a newly created
+// device. If ComputeInstanceInfo.Device resolves to the physical parent GPU,
+// GetUUID returns GPU-... instead of MIG-.... In that case, fall back to
+// profile/placement discovery and verify the discovered GI and CI before
+// accepting its UUID.
 func resolveCreatedMigUUID(candidateUUID, parentUUID string, expectedGI, expectedCI int, findLive func() (*MigLiveTuple, error)) (string, error) {
 	if candidateUUID != parentUUID {
 		return candidateUUID, nil
 	}
 
-	// Some drivers return the parent GPU handle in ComputeInstanceInfo.Device.
-	// In that case GetUUID() yields GPU-... instead of the MIG incarnation UUID.
-	// Resolve the just-created profile/placement through the existing discovery
-	// path and verify that it is the same GI/CI before checkpointing.
 	live, err := findLive()
 	if err != nil {
 		return "", fmt.Errorf("resolve UUID for newly created MIG device: %w", err)

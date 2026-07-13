@@ -55,6 +55,8 @@ type AllocatableDevice struct {
 	// taints holds DRA device taints set by the health monitor. Published
 	// as part of the device's ResourceSlice entry so the scheduler and
 	// kubelet honour them per KEP-5055.
+	// taintsMu protects taints from concurrent access by the health-event handler
+	// and ResourceSlice generation.
 	taintsMu sync.RWMutex
 	taints   []resourceapi.DeviceTaint
 }
