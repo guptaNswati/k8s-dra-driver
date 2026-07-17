@@ -252,6 +252,12 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		if c == DriverPluginCheckpointFileBasename {
 			cp, err := state.getCheckpoint(ctx)
 			if err != nil {
+				// Report and invalidate a corrupt checkpoint.
+				if errors.Is(err, cperrors.CorruptCheckpointError{}) {
+					klog.Errorf("Invalidating corrupt checkpoint: %v", err)
+					common.EmitCheckpointCorruptionEvent(ctx, config.clientsets.Core, DriverName, config.flags.nodeName, os.Getenv("POD_NAME"), config.flags.namespace, err)
+					break
+				}
 				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
 			}
 			storedBootID := cp.GetNodeBootID()
