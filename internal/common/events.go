@@ -18,10 +18,10 @@ package common
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -37,7 +37,7 @@ func EmitCheckpointCorruptionEvent(
 	nodeName string,
 	podName string,
 	namespace string,
-	corruptionErr error,
+	message string,
 ) {
 	if core == nil {
 		klog.Warning("skip checkpoint corruption event: no core clientset available")
@@ -51,8 +51,8 @@ func EmitCheckpointCorruptionEvent(
 	now := metav1.Now()
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "checkpoint-corrupted-",
-			Namespace:    namespace,
+			Name:      podName + "-checkpoint-corrupted",
+			Namespace: namespace,
 		},
 		InvolvedObject: corev1.ObjectReference{
 			APIVersion: "v1",
@@ -61,7 +61,7 @@ func EmitCheckpointCorruptionEvent(
 			Namespace:  namespace,
 		},
 		Reason:  "CheckpointCorrupted",
-		Message: fmt.Sprintf("On-disk checkpoint is corrupted and is being invalidated: %v", corruptionErr),
+		Message: message,
 		Type:    corev1.EventTypeWarning,
 		Source: corev1.EventSource{
 			Component: component,
@@ -79,7 +79,7 @@ func EmitCheckpointCorruptionEvent(
 		eventCtx,
 		event,
 		metav1.CreateOptions{},
-	); err != nil {
+	); err != nil && !apierrors.IsAlreadyExists(err) {
 		klog.Errorf(
 			"failed to emit checkpoint corruption event for pod %q: %v",
 			podName,

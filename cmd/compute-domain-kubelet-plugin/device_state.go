@@ -150,13 +150,18 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 			klog.Infof("Found previous checkpoint: %s", c)
 			cp, err := state.getCheckpoint()
 			if err != nil {
-				// Report and invalidate a corrupt checkpoint.
-				if errors.Is(err, cperrors.CorruptCheckpointError{}) {
-					klog.Errorf("Invalidating corrupt checkpoint: %v", err)
-					common.EmitCheckpointCorruptionEvent(ctx, config.clientsets.Core, DriverName, config.flags.nodeName, os.Getenv("POD_NAME"), config.flags.namespace, err)
-					break
+				if !common.IsCheckpointCorruptionError(err) {
+					return nil, fmt.Errorf("unable to get checkpoint: %w", err)
 				}
-				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
+
+				// ComputeDomain prepares do not always create a per-claim CDI
+				// spec, so there is no reliable checkpoint-independent signal
+				// that automatic recovery is safe. Surface the corruption and
+				// preserve the existing fatal startup behavior.
+				corruption := common.DescribeCheckpointCorruption(err)
+				message := fmt.Sprintf("Corrupt checkpoint detected (%s); automatic recovery is not supported", corruption)
+				common.EmitCheckpointCorruptionEvent(ctx, config.clientsets.Core, DriverName, config.flags.nodeName, os.Getenv("POD_NAME"), config.flags.namespace, message)
+				return nil, fmt.Errorf("cannot automatically recover corrupt checkpoint: %w", err)
 			}
 			storedBootID := cp.GetNodeBootID()
 			if storedBootID == "" { //nolint:gocritic,staticcheck
