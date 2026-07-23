@@ -258,6 +258,9 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 				// The checkpoint cannot be trusted.
 				// Use per-claim CDI specs as evidence of prepared claims.
+				// TODO: How to handle partially prepared device state?
+				// In case of a crash after device preparation but before CDI spec creation may
+				// leave partially prepared device state without CDI evidence.
 				corruption := common.DescribeCheckpointCorruption(err)
 				hasPreparedClaimSpec, checkErr := common.HasClaimCDISpec(config.flags.cdiRoot, DriverName)
 				if checkErr != nil {
