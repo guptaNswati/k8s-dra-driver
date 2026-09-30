@@ -121,6 +121,16 @@ allowed device types.
 
 ## Design
 
+### API changes
+
+User-facing contracts are the Alpha `PerNodeGPUConfig` feature gate, the
+`gpuDriverConfig.name`, `default`, `nodeLabel`, and `map` Helm values, the
+`--driver-config-*` CLI flags and corresponding environment variables, the
+`nvidia.com/dra-driver-gpu.config` node label, and the versioned profile YAML.
+The ConfigMap mount path and in-memory filtering helpers are implementation
+details. This proposal does not change a CRD, opaque ResourceClaim config,
+ResourceSlice attribute, device name, or checkpoint schema.
+
 ### Configuration and selection
 
 `DriverConfig` is a deployment configuration local to the GPU binary, not an
