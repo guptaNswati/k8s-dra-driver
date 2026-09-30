@@ -156,6 +156,49 @@ func TestGenerateDriverResources(t *testing.T) {
 	})
 }
 
+func TestGenerateLegacyDriverResourcesFiltersWithoutMutatingState(t *testing.T) {
+	pciBusID := "0000:01:00.0"
+	gpu := newTestGpuInfo(nil)
+	gpu.pciBusID = pciBusID
+	vfio := &VfioDeviceInfo{
+		index:    0,
+		UUID:     gpu.UUID,
+		PciBusID: pciBusID,
+	}
+	allocatable := AllocatableDevices{
+		gpu.CanonicalName():  {Gpu: gpu},
+		vfio.CanonicalName(): {Vfio: vfio},
+	}
+	config := &Config{
+		flags: &Flags{},
+		driverConfig: &DriverConfig{
+			Version: driverConfigVersion,
+			GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{VfioDeviceType}},
+		},
+	}
+	d := &driver{
+		state: &DeviceState{
+			config: config,
+			perGPUAllocatable: &PerGPUAllocatableDevices{
+				allocatablesMap: map[PCIBusID]AllocatableDevices{pciBusID: allocatable},
+			},
+		},
+	}
+
+	resources := d.generateLegacyDriverResources("node-a", config)
+	slices := resources.Pools["node-a"].Slices
+	require.Len(t, slices, 1)
+	require.Len(t, slices[0].Devices, 1)
+	assert.Equal(t, vfio.CanonicalName(), slices[0].Devices[0].Name)
+	assert.Equal(t, VfioDeviceType, *slices[0].Devices[0].Attributes["type"].StringValue)
+
+	// Publication policy must not remove devices needed by Prepare, Unprepare,
+	// or checkpoint recovery.
+	assert.Len(t, d.state.perGPUAllocatable.GetAllDevices(), 2)
+	assert.NotNil(t, d.state.perGPUAllocatable.GetAllocatableDevice(gpu.CanonicalName()))
+	assert.NotNil(t, d.state.perGPUAllocatable.GetAllocatableDevice(vfio.CanonicalName()))
+}
+
 func TestShutdownNilReceiver(t *testing.T) {
 	var d *driver
 	assert.NoError(t, d.Shutdown())

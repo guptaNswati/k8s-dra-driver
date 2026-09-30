@@ -44,6 +44,19 @@ Disable a plugin you do not need with no impact on the other:
 
 When GPU allocation is enabled, the chart also creates DeviceClass resources for full GPUs, MIG slices, and VFIO passthrough. Individual device types still require the appropriate hardware and [feature gates](feature-gates/).
 
+## GPU publication profiles
+
+| Value | Default | Description |
+|---|---|---|
+| `gpuDriverConfig.name` | `""` | Name of an externally managed ConfigMap containing named DriverConfig profiles. When empty, the chart creates a ConfigMap from `gpuDriverConfig.map`. |
+| `gpuDriverConfig.default` | `mixed` | Startup profile used when the node does not have the selector label. |
+| `gpuDriverConfig.nodeLabel` | `nvidia.com/dra-driver-gpu.config` | Node label whose value selects a profile. Selection is evaluated only when the GPU plugin starts. |
+| `gpuDriverConfig.map` | `mixed`, `container`, `passthrough` profiles | Named, versioned DriverConfig YAML documents. Each profile filters which discovered `gpu`, `mig`, and `vfio` devices are published without changing internal device state. |
+
+Changing the node label or ConfigMap does not reload a running plugin. Restart
+the GPU kubelet plugin pod after changing profile selection. The `mixed`
+default preserves the driver's existing publication behavior.
+
 ## ComputeDomain IMEX
 
 | Value | Default | Description |

@@ -68,6 +68,9 @@ type Flags struct {
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
 	consumableShares              string
+	driverConfigDirectory         string
+	driverConfigDefaultProfile    string
+	driverConfigNodeLabel         string
 }
 
 type Config struct {
@@ -75,6 +78,7 @@ type Config struct {
 	clientsets           pkgflags.ClientSets
 	imagePullSecretNames []string
 	imagePullPolicy      string
+	driverConfig         *DriverConfig
 }
 
 func (c Config) DriverPluginPath() string {
@@ -217,6 +221,26 @@ func newApp() *cli.App {
 			Destination: &flags.consumableShares,
 			EnvVars:     []string{"CONSUMABLE_SHARES"},
 		},
+		&cli.StringFlag{
+			Name:        "driver-config-directory",
+			Usage:       "Directory containing named, startup-only DriverConfig profiles. Empty uses the built-in mixed profile.",
+			Destination: &flags.driverConfigDirectory,
+			EnvVars:     []string{"DRIVER_CONFIG_DIRECTORY"},
+		},
+		&cli.StringFlag{
+			Name:        "driver-config-default-profile",
+			Usage:       "DriverConfig profile used when the node selector label is absent.",
+			Value:       defaultDriverConfigProfile,
+			Destination: &flags.driverConfigDefaultProfile,
+			EnvVars:     []string{"DRIVER_CONFIG_DEFAULT_PROFILE"},
+		},
+		&cli.StringFlag{
+			Name:        "driver-config-node-label",
+			Usage:       "DRA-owned node label whose value selects a DriverConfig profile.",
+			Value:       defaultDriverConfigNodeLabel,
+			Destination: &flags.driverConfigNodeLabel,
+			EnvVars:     []string{"DRIVER_CONFIG_NODE_LABEL"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -256,11 +280,25 @@ func newApp() *cli.App {
 				return fmt.Errorf("create client: %w", err)
 			}
 
+			driverConfig, profile, err := resolveDriverConfig(
+				c.Context,
+				clientSets.Core,
+				flags.nodeName,
+				flags.driverConfigDirectory,
+				flags.driverConfigDefaultProfile,
+				flags.driverConfigNodeLabel,
+			)
+			if err != nil {
+				return fmt.Errorf("resolve driver config: %w", err)
+			}
+			klog.Infof("Using DriverConfig profile %q", profile)
+
 			config := &Config{
 				flags:                flags,
 				clientsets:           clientSets,
 				imagePullSecretNames: strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecrets), ",", " ")),
 				imagePullPolicy:      strings.TrimSpace(flags.imagePullPolicy),
+				driverConfig:         driverConfig,
 			}
 
 			return RunPlugin(c.Context, config)

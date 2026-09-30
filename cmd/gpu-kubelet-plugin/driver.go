@@ -221,6 +221,13 @@ func (d *driver) GenerateDriverResources(nodeName string) resourceslice.DriverRe
 	return d.generateCombinedResourceSlices(nodeName)
 }
 
+func (d *driver) advertisesDevice(device *AllocatableDevice) bool {
+	if d.state.config == nil {
+		return true
+	}
+	return d.state.config.driverConfig.advertises(device.Type())
+}
+
 // generateSplitResourceSlices generates ResourceSlices for DynamicMIG for k8s 1.35+.
 // Creates G+1 resource slices for G physical GPUs:
 // - One slice with all SharedCounters (one counter set per GPU).
@@ -238,6 +245,9 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 		// Stable sort order by devicename
 		for _, devname := range slices.Sorted(maps.Keys(allocatable)) {
 			device := allocatable[devname]
+			if !d.advertisesDevice(device) {
+				continue
+			}
 			klog.V(4).Infof("About to announce device %s", devname)
 
 			// Remember this GPU so we can emit exactly one shared counter
@@ -261,7 +271,9 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 		if gpuInfo != nil {
 			allCounterSets = append(allCounterSets, gpuInfo.PartSharedCounterSets()...)
 		}
-		gpuslices = append(gpuslices, deviceSlice)
+		if len(deviceSlice.Devices) > 0 {
+			gpuslices = append(gpuslices, deviceSlice)
+		}
 	}
 
 	sharedCountersSlice := resourceslice.Slice{
@@ -297,6 +309,9 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 		// restart (the slice diff is logged).
 		for _, devname := range slices.Sorted(maps.Keys(allocatable)) {
 			device := allocatable[devname]
+			if !d.advertisesDevice(device) {
+				continue
+			}
 			klog.V(4).Infof("About to announce device %s", devname)
 
 			// Remember this GPU so we can emit exactly one shared counter
@@ -323,12 +338,37 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 		if gpuInfo != nil {
 			slice.SharedCounters = gpuInfo.PartSharedCounterSets()
 		}
-		gpuslices = append(gpuslices, slice)
+		if len(slice.Devices) > 0 {
+			gpuslices = append(gpuslices, slice)
+		}
+	}
+
+	if len(gpuslices) == 0 {
+		gpuslices = append(gpuslices, resourceslice.Slice{})
 	}
 
 	return resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
 			nodeName: {Slices: gpuslices},
+		},
+	}
+}
+
+func (d *driver) generateLegacyDriverResources(nodeName string, config *Config) resourceslice.DriverResources {
+	var resourceSlice resourceslice.Slice
+	for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
+		for _, device := range devices {
+			if !d.advertisesDevice(device) {
+				continue
+			}
+			klog.V(4).Infof("About to announce device %s", device.GetDevice(config).Name)
+			resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice(config))
+		}
+	}
+
+	return resourceslice.DriverResources{
+		Pools: map[string]resourceslice.Pool{
+			nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
 		},
 	}
 }
@@ -512,21 +552,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 		return nil
 	}
 
-	// Enumerate the set of GPU, MIG and VFIO devices and publish them
-	var resourceSlice resourceslice.Slice
-	for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
-		for _, device := range devices {
-			klog.V(4).Infof("About to announce device %s", device.GetDevice(config).Name)
-			resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice(config))
-		}
-	}
-
-	resources := resourceslice.DriverResources{
-		Pools: map[string]resourceslice.Pool{
-			config.flags.nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
-		},
-	}
-
+	resources := d.generateLegacyDriverResources(config.flags.nodeName, config)
 	if err := d.pluginhelper.PublishResources(ctx, resources); err != nil {
 		return err
 	}

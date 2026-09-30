@@ -106,6 +106,27 @@ resources:
       # IMEX_CMD_UNIX_DOMAIN_PATH to this same path.
       hostSocketPath: "/etc/nvidia-imex/imex_ctrl.sock"
 
+# Startup-only, per-node GPU ResourceSlice publication profiles.
+# Set name to mount an externally managed ConfigMap instead of creating one
+# from map. ConfigMap keys are profile names and values are DriverConfig YAML.
+gpuDriverConfig:
+  name: ""
+  default: mixed
+  nodeLabel: nvidia.com/dra-driver-gpu.config
+  map:
+    mixed: |-
+      version: v1alpha1
+      gpu:
+        advertisedDeviceTypes: [gpu, mig, vfio]
+    container: |-
+      version: v1alpha1
+      gpu:
+        advertisedDeviceTypes: [gpu, mig]
+    passthrough: |-
+      version: v1alpha1
+      gpu:
+        advertisedDeviceTypes: [vfio]
+
 # Feature gates configuration following Kubernetes patterns
 # Configure feature gates as key-value pairs (feature_name: true/false)
 # Examples:

@@ -109,6 +109,17 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Create the name of the ConfigMap containing GPU DriverConfig profiles.
+*/}}
+{{- define "dra-driver-nvidia-gpu.gpuDriverConfigMapName" -}}
+{{- if .Values.gpuDriverConfig.name }}
+{{- .Values.gpuDriverConfig.name }}
+{{- else }}
+{{- printf "%s-gpu-driver-config" (include "dra-driver-nvidia-gpu.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{/*
 Create the name of the webhook service account to use
 */}}
 {{- define "dra-driver-nvidia-gpu.webhookServiceAccountName" -}}

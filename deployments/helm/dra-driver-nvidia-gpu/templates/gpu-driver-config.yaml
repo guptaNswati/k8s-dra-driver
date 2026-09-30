@@ -1,0 +1,14 @@
+{{- if and .Values.resources.gpus.enabled (not .Values.gpuDriverConfig.name) }}
+{{- if not (hasKey .Values.gpuDriverConfig.map .Values.gpuDriverConfig.default) }}
+{{- fail (printf "gpuDriverConfig.default %q is not present in gpuDriverConfig.map" .Values.gpuDriverConfig.default) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dra-driver-nvidia-gpu.gpuDriverConfigMapName" . }}
+  namespace: {{ include "dra-driver-nvidia-gpu.namespace" . }}
+  labels:
+    {{- include "dra-driver-nvidia-gpu.labels" . | nindent 4 }}
+data:
+  {{- toYaml .Values.gpuDriverConfig.map | nindent 2 }}
+{{- end }}
