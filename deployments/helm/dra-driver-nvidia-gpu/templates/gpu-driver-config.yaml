@@ -1,4 +1,4 @@
-{{- if and .Values.resources.gpus.enabled (not .Values.gpuDriverConfig.name) }}
+{{- if and .Values.resources.gpus.enabled (and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig)) (not .Values.gpuDriverConfig.name) }}
 {{- if not (hasKey .Values.gpuDriverConfig.map .Values.gpuDriverConfig.default) }}
 {{- fail (printf "gpuDriverConfig.default %q is not present in gpuDriverConfig.map" .Values.gpuDriverConfig.default) }}
 {{- end }}

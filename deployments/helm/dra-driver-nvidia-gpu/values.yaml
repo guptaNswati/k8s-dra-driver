@@ -107,6 +107,8 @@ resources:
       hostSocketPath: "/etc/nvidia-imex/imex_ctrl.sock"
 
 # Startup-only, per-node GPU ResourceSlice publication profiles.
+# Requires featureGates.PerNodeGPUConfig=true. When the gate is disabled, these
+# values do not add resources, mounts, or environment variables to the deployment.
 # Set name to mount an externally managed ConfigMap instead of creating one
 # from map. ConfigMap keys are profile names and values are DriverConfig YAML.
 gpuDriverConfig:

@@ -53,9 +53,44 @@ When GPU allocation is enabled, the chart also creates DeviceClass resources for
 | `gpuDriverConfig.nodeLabel` | `nvidia.com/dra-driver-gpu.config` | Node label whose value selects a profile. Selection is evaluated only when the GPU plugin starts. |
 | `gpuDriverConfig.map` | `mixed`, `container`, `passthrough` profiles | Named, versioned DriverConfig YAML documents. Each profile filters which discovered `gpu`, `mig`, and `vfio` devices are published without changing internal device state. |
 
-Changing the node label or ConfigMap does not reload a running plugin. Restart
-the GPU kubelet plugin pod after changing profile selection. The `mixed`
-default preserves the driver's existing publication behavior.
+The profiles are used only when `featureGates.PerNodeGPUConfig=true`. The gate
+is disabled by default, so default installations do not create or mount the
+ConfigMap and continue to publish the existing mixed device inventory.
+
+Profile changes are startup-only and do not roll plugin pods automatically.
+While the gate is enabled, the chart sets the kubelet-plugin DaemonSet update
+strategy to `OnDelete`. Before changing a node label, the selected profile, or
+the default profile:
+
+1. Cordon and drain the node:
+
+   ```bash
+   kubectl cordon <node>
+   kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+   ```
+
+2. Wait for GPU ResourceClaim workloads to terminate and for their resources to
+   be unprepared. Do not proceed while the node has active prepared claims.
+3. Update the label or ConfigMap. For example:
+
+   ```bash
+   kubectl label node <node> --overwrite \
+       nvidia.com/dra-driver-gpu.config=passthrough
+   ```
+
+4. Find and delete the kubelet-plugin DaemonSet pod on that node so it restarts
+   with the new startup profile:
+
+   ```bash
+   kubectl -n <driver-namespace> get pods -o wide
+   kubectl -n <driver-namespace> delete pod <kubelet-plugin-pod-on-node>
+   ```
+
+5. Verify the node's `gpu.nvidia.com` ResourceSlices advertise the expected
+   device types, then run `kubectl uncordon <node>`.
+
+The POC does not validate active claims during startup. Draining is therefore a
+mandatory safety requirement, not an optional rollout recommendation.
 
 ## ComputeDomain IMEX
 

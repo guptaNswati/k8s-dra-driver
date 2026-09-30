@@ -28,9 +28,15 @@ spec:
   selector:
     matchLabels:
       {{- include "dra-driver-nvidia-gpu.selectorLabels" (dict "context" . "componentName" "kubelet-plugin") | nindent 6 }}
+  {{- if and .Values.resources.gpus.enabled (and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig)) }}
+  # Startup-only profiles require an explicit drain and pod deletion.
+  updateStrategy:
+    type: OnDelete
+  {{- else }}
   {{- with .Values.kubeletPlugin.updateStrategy }}
   updateStrategy:
     {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- end }}
   template:
     metadata:
@@ -287,12 +293,14 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig) }}
         - name: DRIVER_CONFIG_DIRECTORY
           value: /etc/nvidia-dra-driver/configs
         - name: DRIVER_CONFIG_DEFAULT_PROFILE
           value: {{ .Values.gpuDriverConfig.default | quote }}
         - name: DRIVER_CONFIG_NODE_LABEL
           value: {{ .Values.gpuDriverConfig.nodeLabel | quote }}
+        {{- end }}
         - name: SERVICE_ACCOUNT_NAME
           valueFrom:
             fieldRef:
@@ -341,9 +349,11 @@ spec:
         - name: driver-root
           mountPath: /driver-root
           mountPropagation: HostToContainer
+        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig) }}
         - name: gpu-driver-config
           mountPath: /etc/nvidia-dra-driver/configs
           readOnly: true
+        {{- end }}
         {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
         - name: host-root
           mountPath: /host-root
@@ -371,7 +381,7 @@ spec:
       - name: cdi
         hostPath:
           path: /var/run/cdi
-      {{- if .Values.resources.gpus.enabled }}
+      {{- if and .Values.resources.gpus.enabled (and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig)) }}
       - name: gpu-driver-config
         configMap:
           name: {{ include "dra-driver-nvidia-gpu.gpuDriverConfigMapName" . }}

@@ -67,6 +67,7 @@ jobs:
               'PassthroughSupport',
               'DynamicMIG',
               'NVMLDeviceHealthCheck',
+              'PerNodeGPUConfig',
               'ComputeDomainCliques',
               'CrashOnNVLinkFabricErrors',
               'IMEXDaemonsWithDNSNames',

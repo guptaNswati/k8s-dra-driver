@@ -280,16 +280,20 @@ func newApp() *cli.App {
 				return fmt.Errorf("create client: %w", err)
 			}
 
-			driverConfig, profile, err := resolveDriverConfig(
-				c.Context,
-				clientSets.Core,
-				flags.nodeName,
-				flags.driverConfigDirectory,
-				flags.driverConfigDefaultProfile,
-				flags.driverConfigNodeLabel,
-			)
-			if err != nil {
-				return fmt.Errorf("resolve driver config: %w", err)
+			driverConfig := defaultDriverConfig()
+			profile := defaultDriverConfigProfile
+			if featuregates.Enabled(featuregates.PerNodeGPUConfig) {
+				driverConfig, profile, err = resolveDriverConfig(
+					c.Context,
+					clientSets.Core,
+					flags.nodeName,
+					flags.driverConfigDirectory,
+					flags.driverConfigDefaultProfile,
+					flags.driverConfigNodeLabel,
+				)
+				if err != nil {
+					return fmt.Errorf("resolve driver config: %w", err)
+				}
 			}
 			klog.Infof("Using DriverConfig profile %q", profile)
 

@@ -127,6 +127,7 @@ body:
         - "MPSSupport (enabled)"
         - "NVMLDeviceHealthCheck (enabled)"
         - "PassthroughSupport (enabled)"
+        - "PerNodeGPUConfig (enabled)"
         - "TimeSlicingSettings (enabled)"
 
   - type: textarea
