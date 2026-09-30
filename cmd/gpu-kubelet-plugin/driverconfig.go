@@ -127,7 +127,10 @@ func resolveDriverConfig(
 	}
 
 	profile := defaultProfile
-	if selected := node.Labels[nodeLabel]; selected != "" {
+	if selected, exists := node.Labels[nodeLabel]; exists {
+		if selected == "" {
+			return nil, "", fmt.Errorf("driver config node label %q must not be empty", nodeLabel)
+		}
 		profile = selected
 	}
 	if profile == "" {

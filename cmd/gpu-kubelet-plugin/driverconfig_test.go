@@ -158,6 +158,22 @@ gpu:
 		assert.Equal(t, []string{VfioDeviceType}, config.GPU.AdvertisedDeviceTypes)
 	})
 
+	t.Run("explicit empty label fails closed", func(t *testing.T) {
+		directory := t.TempDir()
+		client := k8sfake.NewSimpleClientset(&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-a",
+				Labels: map[string]string{defaultDriverConfigNodeLabel: ""},
+			},
+		})
+
+		_, _, err := resolveDriverConfig(
+			context.Background(), client, "node-a", directory, "mixed", defaultDriverConfigNodeLabel,
+		)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "must not be empty")
+	})
+
 	t.Run("unknown profile fails", func(t *testing.T) {
 		directory := t.TempDir()
 		client := k8sfake.NewSimpleClientset(&corev1.Node{

@@ -156,6 +156,83 @@ func TestGenerateDriverResources(t *testing.T) {
 	})
 }
 
+func TestGenerateDriverResourcesFiltersDynamicMIG(t *testing.T) {
+	for _, useSplit := range []bool{false, true} {
+		name := "combined"
+		if useSplit {
+			name = "split"
+		}
+		t.Run(name, func(t *testing.T) {
+			pciBusID := "0000:01:00.0"
+			parent := newTestGpuInfo(nil)
+			parent.pciBusID = pciBusID
+			mig := newMigSpec(0, 19, 0, pciBusID)
+			mig.Parent = parent
+			allocatable := AllocatableDevices{
+				parent.CanonicalName(): {Gpu: parent},
+				mig.CanonicalName():    {MigDynamic: mig},
+			}
+			config := &Config{
+				flags: &Flags{},
+				driverConfig: &DriverConfig{
+					Version: driverConfigVersion,
+					GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{MigStaticDeviceType}},
+				},
+			}
+			d := &driver{
+				useSplitResourceSlices: useSplit,
+				state: &DeviceState{
+					config: config,
+					perGPUAllocatable: &PerGPUAllocatableDevices{
+						allocatablesMap: map[PCIBusID]AllocatableDevices{pciBusID: allocatable},
+					},
+				},
+			}
+
+			resources := d.GenerateDriverResources("node-a")
+			slices := resources.Pools["node-a"].Slices
+			deviceSlice := slices[0]
+			if useSplit {
+				require.Len(t, slices, 2)
+				assert.Empty(t, slices[0].Devices)
+				deviceSlice = slices[1]
+			} else {
+				require.Len(t, slices, 1)
+			}
+			require.Len(t, deviceSlice.Devices, 1)
+			assert.Equal(t, mig.CanonicalName(), deviceSlice.Devices[0].Name)
+			assert.Equal(t, MigStaticDeviceType, *deviceSlice.Devices[0].Attributes["type"].StringValue)
+			assert.Len(t, d.state.perGPUAllocatable.GetAllDevices(), 2)
+		})
+	}
+}
+
+func TestGenerateDriverResourcesKeepsEmptyPoolWhenAllDevicesFiltered(t *testing.T) {
+	for _, useSplit := range []bool{false, true} {
+		name := "combined"
+		if useSplit {
+			name = "split"
+		}
+		t.Run(name, func(t *testing.T) {
+			gpu := newTestGpuInfo(nil)
+			d := newTestDriverWithGPUs(useSplit, map[PCIBusID]*GpuInfo{"0000:01:00.0": gpu})
+			d.state.config = &Config{
+				flags: &Flags{},
+				driverConfig: &DriverConfig{
+					Version: driverConfigVersion,
+					GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{VfioDeviceType}},
+				},
+			}
+
+			resources := d.GenerateDriverResources("node-a")
+			slices := resources.Pools["node-a"].Slices
+			require.Len(t, slices, 1)
+			assert.Empty(t, slices[0].Devices)
+			assert.Len(t, d.state.perGPUAllocatable.GetAllDevices(), 1)
+		})
+	}
+}
+
 func TestGenerateLegacyDriverResourcesFiltersWithoutMutatingState(t *testing.T) {
 	pciBusID := "0000:01:00.0"
 	gpu := newTestGpuInfo(nil)
