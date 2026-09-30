@@ -81,7 +81,7 @@ func TestValidateDriverConfigCompatibility(t *testing.T) {
 	t.Run("incompatible allocation fails startup", func(t *testing.T) {
 		err := stateFor(GpuDeviceType).validateDriverConfigCompatibility(checkpointWithAllocation("gpu-vfio-0"))
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "required by checkpointed claim")
+		require.ErrorContains(t, err, "required by checkpointed claim")
 	})
 
 	t.Run("incompatible prepared device fails startup", func(t *testing.T) {
@@ -96,7 +96,7 @@ func TestValidateDriverConfigCompatibility(t *testing.T) {
 
 		err := stateFor(GpuDeviceType).validateDriverConfigCompatibility(checkpoint)
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "prepared device type")
+		require.ErrorContains(t, err, "prepared device type")
 	})
 
 	t.Run("mixed profile remains compatible", func(t *testing.T) {
