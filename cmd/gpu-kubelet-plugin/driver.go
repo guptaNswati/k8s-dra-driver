@@ -75,6 +75,16 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 
+	if featuregates.Enabled(featuregates.PerNodeGPUConfig) {
+		checkpoint, err := state.getCheckpoint(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("read checkpoint before applying DriverConfig: %w", err)
+		}
+		if err := state.validateDriverConfigCompatibility(checkpoint); err != nil {
+			return nil, err
+		}
+	}
+
 	useSplitSlices := false
 
 	if featuregates.Enabled(featuregates.DynamicMIG) {

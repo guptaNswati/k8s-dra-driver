@@ -31,6 +31,81 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
+func TestValidateDriverConfigCompatibility(t *testing.T) {
+	pciBusID := "0000:00:00.0"
+	stateFor := func(deviceTypes ...string) *DeviceState {
+		return &DeviceState{
+			config: &Config{
+				driverConfig: &DriverConfig{
+					Version: driverConfigVersion,
+					GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: deviceTypes},
+				},
+			},
+			perGPUAllocatable: &PerGPUAllocatableDevices{
+				allocatablesMap: map[PCIBusID]AllocatableDevices{
+					pciBusID: {
+						"gpu-0": {
+							Gpu: &GpuInfo{minor: 0, pciBusID: pciBusID},
+						},
+						"gpu-vfio-0": {
+							Vfio: &VfioDeviceInfo{index: 0, PciBusID: pciBusID},
+						},
+					},
+				},
+			},
+		}
+	}
+	checkpointWithAllocation := func(deviceName string) *Checkpoint {
+		return &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{
+			"claim-1": {
+				CheckpointState: ClaimCheckpointStatePrepareStarted,
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{
+							Results: []resourceapi.DeviceRequestAllocationResult{{
+								Driver: DriverName,
+								Device: deviceName,
+							}},
+						},
+					},
+				},
+			},
+		}}}
+	}
+
+	t.Run("compatible allocation succeeds", func(t *testing.T) {
+		err := stateFor(GpuDeviceType).validateDriverConfigCompatibility(checkpointWithAllocation("gpu-0"))
+		require.NoError(t, err)
+	})
+
+	t.Run("incompatible allocation fails startup", func(t *testing.T) {
+		err := stateFor(GpuDeviceType).validateDriverConfigCompatibility(checkpointWithAllocation("gpu-vfio-0"))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "required by checkpointed claim")
+	})
+
+	t.Run("incompatible prepared device fails startup", func(t *testing.T) {
+		checkpoint := &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{
+			"claim-1": {
+				CheckpointState: ClaimCheckpointStatePrepareCompleted,
+				PreparedDevices: PreparedDevices{&PreparedDeviceGroup{
+					Devices: PreparedDeviceList{newPreparedVfioDevice("gpu-vfio-0", "GPU-0000")},
+				}},
+			},
+		}}}
+
+		err := stateFor(GpuDeviceType).validateDriverConfigCompatibility(checkpoint)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "prepared device type")
+	})
+
+	t.Run("mixed profile remains compatible", func(t *testing.T) {
+		err := stateFor(GpuDeviceType, MigStaticDeviceType, VfioDeviceType).
+			validateDriverConfigCompatibility(checkpointWithAllocation("gpu-vfio-0"))
+		require.NoError(t, err)
+	})
+}
+
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
 	perGPU := &PerGPUAllocatableDevices{
 		allocatablesMap: map[PCIBusID]AllocatableDevices{

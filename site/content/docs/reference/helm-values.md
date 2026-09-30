@@ -60,7 +60,7 @@ ConfigMap and continue to publish the existing mixed device inventory.
 Profile changes are startup-only and do not roll plugin pods automatically.
 While the gate is enabled, the chart sets the kubelet-plugin DaemonSet update
 strategy to `OnDelete`. Before changing a node label, the selected profile, or
-the default profile:
+the default profile, and before upgrading the chart while the gate is enabled:
 
 1. Cordon and drain the node:
 
@@ -89,8 +89,16 @@ the default profile:
 5. Verify the node's `gpu.nvidia.com` ResourceSlices advertise the expected
    device types, then run `kubectl uncordon <node>`.
 
-The POC does not validate active claims during startup. Draining is therefore a
-mandatory safety requirement, not an optional rollout recommendation.
+At startup, the plugin rejects a profile that excludes a device type required
+by a claim in its local checkpoint. That check cannot detect every allocation
+which has not yet reached Prepare, so draining remains mandatory.
+
+Enable the gate only while affected GPU nodes are cordoned and drained; the
+`OnDelete` strategy leaves existing pods unchanged until you delete them.
+To disable the gate safely, keep nodes cordoned and drained, first move every
+node to `mixed` and manually restart its plugin pod, then disable the gate
+without uncordoning between those steps. Disabling the gate restores the
+configured DaemonSet update strategy and may roll the pods automatically.
 
 ## ComputeDomain IMEX
 

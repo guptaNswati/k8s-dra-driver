@@ -288,6 +288,47 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	return state, nil
 }
 
+func (s *DeviceState) validateDriverConfigCompatibility(checkpoint *Checkpoint) error {
+	if checkpoint == nil || checkpoint.V2 == nil {
+		return nil
+	}
+
+	for claimUID, claim := range checkpoint.V2.PreparedClaims {
+		if claim.Status.Allocation != nil {
+			for _, result := range claim.Status.Allocation.Devices.Results {
+				if result.Driver != DriverName {
+					continue
+				}
+				device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+				if device != nil && !s.config.driverConfig.advertises(device.Type()) {
+					return fmt.Errorf(
+						"DriverConfig does not advertise device type %q required by checkpointed claim %q",
+						device.Type(),
+						claimUID,
+					)
+				}
+			}
+		}
+
+		for _, group := range claim.PreparedDevices {
+			if group == nil {
+				continue
+			}
+			for _, device := range group.Devices {
+				if !s.config.driverConfig.advertises(device.Type()) {
+					return fmt.Errorf(
+						"DriverConfig does not advertise prepared device type %q required by checkpointed claim %q",
+						device.Type(),
+						claimUID,
+					)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceClaim) ([]kubeletplugin.Device, error) {
 
 	if err := s.validateAdminAccessRequest(claim); err != nil {
