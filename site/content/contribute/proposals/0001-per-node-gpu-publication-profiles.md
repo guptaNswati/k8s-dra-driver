@@ -8,7 +8,7 @@ description: Startup-only per-node filtering of GPU ResourceSlice publication.
 | Field          | Value |
 |----------------|-------|
 | Status         | provisional |
-| Authors        | TBD |
+| Authors        | @guptaNswati |
 | Created        | 2026-09-30 |
 | Related issues | [#1067](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/1067) |
 
