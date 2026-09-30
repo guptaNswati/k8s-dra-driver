@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	coreclientset "k8s.io/client-go/kubernetes"
@@ -116,6 +117,9 @@ func resolveDriverConfig(
 	if client == nil {
 		return nil, "", fmt.Errorf("kubernetes client is required")
 	}
+	if errs := validation.IsQualifiedName(nodeLabel); len(errs) > 0 {
+		return nil, "", fmt.Errorf("invalid driver config node label %q: %v", nodeLabel, errs)
+	}
 
 	node, err := client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
@@ -131,6 +135,9 @@ func resolveDriverConfig(
 	}
 	if errs := validation.IsConfigMapKey(profile); len(errs) > 0 {
 		return nil, "", fmt.Errorf("invalid driver config profile %q: %v", profile, errs)
+	}
+	if errs := content.IsPathSegmentName(profile); len(errs) > 0 {
+		return nil, "", fmt.Errorf("invalid driver config profile path %q: %v", profile, errs)
 	}
 
 	data, err := os.ReadFile(filepath.Join(configDirectory, profile))

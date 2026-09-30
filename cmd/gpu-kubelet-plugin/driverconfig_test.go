@@ -173,6 +173,22 @@ gpu:
 		require.Error(t, err)
 	})
 
+	t.Run("profile cannot escape config directory", func(t *testing.T) {
+		directory := t.TempDir()
+		client := k8sfake.NewSimpleClientset(&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-a",
+				Labels: map[string]string{defaultDriverConfigNodeLabel: ".."},
+			},
+		})
+
+		_, _, err := resolveDriverConfig(
+			context.Background(), client, "node-a", directory, "mixed", defaultDriverConfigNodeLabel,
+		)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "invalid driver config profile path")
+	})
+
 	t.Run("unknown field fails strict decoding", func(t *testing.T) {
 		directory := t.TempDir()
 		writeProfile(t, directory, "mixed", `
