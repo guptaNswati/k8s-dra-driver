@@ -187,6 +187,6 @@ gpu:
 			context.Background(), client, "node-a", directory, "mixed", defaultDriverConfigNodeLabel,
 		)
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "field sharing not found")
+		assert.ErrorContains(t, err, `unknown field "sharing"`)
 	})
 }
