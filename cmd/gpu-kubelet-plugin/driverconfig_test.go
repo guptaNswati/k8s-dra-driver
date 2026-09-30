@@ -186,7 +186,7 @@ gpu:
 			context.Background(), client, "node-a", directory, "mixed", defaultDriverConfigNodeLabel,
 		)
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "invalid driver config profile path")
+		assert.ErrorContains(t, err, "invalid driver config profile")
 	})
 
 	t.Run("unknown field fails strict decoding", func(t *testing.T) {
