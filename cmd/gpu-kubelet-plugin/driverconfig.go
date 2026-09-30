@@ -42,6 +42,7 @@ type DriverConfig struct {
 	GPU     *GPUDriverConfig `json:"gpu,omitempty"`
 }
 
+// GPUDriverConfig controls which discovered GPU device types are published.
 type GPUDriverConfig struct {
 	AdvertisedDeviceTypes []string `json:"advertisedDeviceTypes"`
 }
