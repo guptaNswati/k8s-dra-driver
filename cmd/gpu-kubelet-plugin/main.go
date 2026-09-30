@@ -349,6 +349,13 @@ func validateCLIFlags(flags *Flags) error {
 		return fmt.Errorf("--consumable-shares requires feature gate %s to be enabled", featuregates.ConsumableShares)
 	}
 
+	if !featuregates.Enabled(featuregates.PerNodeGPUConfig) &&
+		(flags.driverConfigDirectory != "" ||
+			(flags.driverConfigDefaultProfile != "" && flags.driverConfigDefaultProfile != defaultDriverConfigProfile) ||
+			(flags.driverConfigNodeLabel != "" && flags.driverConfigNodeLabel != defaultDriverConfigNodeLabel)) {
+		return fmt.Errorf("driver config options require feature gate %s to be enabled", featuregates.PerNodeGPUConfig)
+	}
+
 	if flags.consumableShares != "disabled" && flags.consumableShares != "memory" && flags.consumableShares != "unlimited" {
 		val, err := strconv.Atoi(flags.consumableShares)
 		if err != nil || val <= 0 {

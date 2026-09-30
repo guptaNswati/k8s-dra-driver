@@ -100,3 +100,80 @@ func TestValidateCLIFlagsConsumableShares(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCLIFlagsDriverConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		featureGate    bool
+		configureFlags func(*Flags)
+		expectErr      bool
+	}{
+		{
+			name:        "defaults succeed when feature gate is disabled",
+			featureGate: false,
+		},
+		{
+			name:        "config directory requires feature gate",
+			featureGate: false,
+			configureFlags: func(flags *Flags) {
+				flags.driverConfigDirectory = "/profiles"
+			},
+			expectErr: true,
+		},
+		{
+			name:        "non-default profile requires feature gate",
+			featureGate: false,
+			configureFlags: func(flags *Flags) {
+				flags.driverConfigDefaultProfile = "container"
+			},
+			expectErr: true,
+		},
+		{
+			name:        "non-default node label requires feature gate",
+			featureGate: false,
+			configureFlags: func(flags *Flags) {
+				flags.driverConfigNodeLabel = "example.com/profile"
+			},
+			expectErr: true,
+		},
+		{
+			name:        "driver config options succeed when feature gate is enabled",
+			featureGate: true,
+			configureFlags: func(flags *Flags) {
+				flags.driverConfigDirectory = "/profiles"
+				flags.driverConfigDefaultProfile = "container"
+				flags.driverConfigNodeLabel = "example.com/profile"
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+				string(featuregates.PerNodeGPUConfig): tc.featureGate,
+			}))
+			t.Cleanup(func() {
+				require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+					string(featuregates.PerNodeGPUConfig): false,
+				}))
+			})
+
+			flags := &Flags{
+				consumableShares:           "disabled",
+				driverConfigDefaultProfile: defaultDriverConfigProfile,
+				driverConfigNodeLabel:      defaultDriverConfigNodeLabel,
+			}
+			if tc.configureFlags != nil {
+				tc.configureFlags(flags)
+			}
+
+			err := validateCLIFlags(flags)
+			if tc.expectErr {
+				require.Error(t, err)
+				require.ErrorContains(t, err, string(featuregates.PerNodeGPUConfig))
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
