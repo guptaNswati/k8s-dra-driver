@@ -111,7 +111,7 @@ func NewCDIHandler(opts ...cdiOption) (*CDIHandler, error) {
 	return h, nil
 }
 
-func (cdi *CDIHandler) GetCommonEditsCached(requireNVIDIADeviceNodes bool) (*cdiapi.ContainerEdits, error) {
+func (cdi *CDIHandler) GetCommonEditsCached() (*cdiapi.ContainerEdits, error) {
 	key := "commonEdits"
 	if v, ok := cdi.specCache.Get(key); ok {
 		edits, ok := v.(*cdiapi.ContainerEdits)
@@ -131,13 +131,7 @@ func (cdi *CDIHandler) GetCommonEditsCached(requireNVIDIADeviceNodes bool) (*cdi
 		return nil, err
 	}
 	if err := validateCommonDeviceNodes(v); err != nil {
-		if requireNVIDIADeviceNodes {
-			return nil, err
-		}
-		// VFIO devices do not require NVIDIA device nodes, but incomplete
-		// common edits must not be cached for a later GPU or MIG claim.
-		clone := *v
-		return &clone, nil
+		return nil, err
 	}
 	cdi.specCache.Set(key, v, time.Duration(5*time.Minute))
 	// Return a shallow copy, see above.
@@ -187,7 +181,10 @@ func (cdi *CDIHandler) InvalidateDeviceSpec(uuid string) {
 	cdi.specCache.Delete(uuid)
 }
 
-// validateCommonDeviceNodes verifies that nvcdi has the device nodes required by GPU and MIG workloads.
+// validateCommonDeviceNodes verifies that nvcdi emitted the global NVIDIA
+// control and UVM device nodes required by GPU and MIG workloads. nvcdi's
+// character-device discoverer resolves these paths against its configured
+// devRoot and omits nodes that do not exist there.
 func validateCommonDeviceNodes(edits *cdiapi.ContainerEdits) error {
 	requiredPaths := []string{
 		"/dev/nvidiactl",
@@ -215,7 +212,7 @@ func validateCommonDeviceNodes(edits *cdiapi.ContainerEdits) error {
 	return nil
 }
 
-// validateGPUDeviceNodes verifies that nvcdi has a per-GPU device node.
+// validateGPUDeviceNodes verifies that nvcdi found a per-GPU device node.
 func validateGPUDeviceNodes(uuid string, devices []cdispec.Device) error {
 	const deviceNodePrefix = "/dev/nvidia"
 
@@ -236,8 +233,8 @@ func validateGPUDeviceNodes(uuid string, devices []cdispec.Device) error {
 	return fmt.Errorf("failed to validate NVIDIA CDI device spec for GPU %q: missing /dev/nvidia<minor> device node; NVIDIA driver installation may be incomplete", uuid)
 }
 
-// requiresNVIDIADeviceNodes reports whether the claim needs NVIDIA device nodes.
-// VFIO-only claims use /dev/vfio devices instead.
+// requiresNVIDIADeviceNodes reports whether the claim needs NVIDIA control and
+// GPU device nodes. VFIO-only claims use /dev/vfio devices instead.
 func requiresNVIDIADeviceNodes(preparedDevices PreparedDevices) bool {
 	for _, group := range preparedDevices {
 		for _, device := range group.Devices {
@@ -260,14 +257,18 @@ func requiresNVIDIADeviceNodes(preparedDevices PreparedDevices) bool {
 // full-GPU CDI spec during prepare() (or: to cache it, and re-generate it every
 // now and then during this program's lifetime).
 func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices) error {
-	// Generate those parts of the container spec that are not device-specific
-	// (to inject e.g. driver library mounts and meta devices). Note that
-	// `nvcdiDevice.GetCommonEdits()` may usually initialize nvsandboxutilslib
-	// under the hood -- we now prevent that from happening by using
-	// `nvcdi.FeatureDisableNvsandboxUtils` above.
-	commonEdits, err := cdi.GetCommonEditsCached(requiresNVIDIADeviceNodes(preparedDevices))
-	if err != nil {
-		return fmt.Errorf("failed to get common CDI spec edits: %w", err)
+	commonEdits := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}
+	if requiresNVIDIADeviceNodes(preparedDevices) {
+		// Generate those parts of the container spec that are not device-specific
+		// (to inject e.g. driver library mounts and meta devices). Note that
+		// `nvcdiDevice.GetCommonEdits()` may usually initialize nvsandboxutilslib
+		// under the hood -- we now prevent that from happening by using
+		// `nvcdi.FeatureDisableNvsandboxUtils` above.
+		var err error
+		commonEdits, err = cdi.GetCommonEditsCached()
+		if err != nil {
+			return fmt.Errorf("failed to get common CDI spec edits: %w", err)
+		}
 	}
 
 	var deviceSpecs []cdispec.Device
