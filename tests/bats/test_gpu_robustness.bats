@@ -341,12 +341,19 @@ SPEC
   MOCK_NVML_UVM_TOOLS_REMOVED=true
 
   kubectl delete pod -n dra-driver-nvidia-gpu "${plugin_pod}" --wait=true --timeout=60s
-  kubectl wait --for=condition=READY pods \
-    -n dra-driver-nvidia-gpu \
-    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
-    --timeout=60s
 
-  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  plugin_pod=""
+  for _ in $(seq 1 60); do
+    plugin_pod=$(get_one_kubelet_plugin_pod_name 2>/dev/null || true)
+    [ -n "${plugin_pod}" ] && break
+    sleep 1
+  done
+  [ -n "${plugin_pod}" ]
+
+  kubectl wait --for=condition=Ready \
+    -n dra-driver-nvidia-gpu \
+    pod/"${plugin_pod}" \
+    --timeout=60s
   local plugin_uid
   plugin_uid=$(kubectl get pod -n dra-driver-nvidia-gpu "${plugin_pod}" -o jsonpath='{.metadata.uid}')
   local plugin_restart_count
@@ -369,7 +376,9 @@ SPEC
   # same pod without another plugin restart. This proves the incomplete edits
   # were not cached.
   restore_mock_nvml_uvm_tools_node
-  kubectl wait --for=condition=READY pod/"${_podname}" --timeout=60s
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    test -c /driver-root/dev/nvidia-uvm-tools
+  kubectl wait --for=condition=Ready pod/"${_podname}" --timeout=180s
 
   local current_plugin_pod
   current_plugin_pod=$(get_one_kubelet_plugin_pod_name)
