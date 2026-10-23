@@ -49,7 +49,7 @@ When GPU allocation is enabled, the chart also creates DeviceClass resources for
 | Value | Default | Description |
 |---|---|---|
 | `gpuDriverConfig.default` | `""` | Profile selected when a node has no `nvidia.com/dra-driver-gpu.config` label. Empty leaves device availability unchanged on unlabeled nodes. A non-empty name must exist in `gpuDriverConfig.map`. |
-| `gpuDriverConfig.map` | `container`, `passthrough` profiles | Named, versioned DriverConfig YAML documents. Each profile filters which discovered `gpu`, `mig`, and `vfio` devices remain allocatable and published. Feature gates remain release-wide. |
+| `gpuDriverConfig.map` | `container`, `passthrough` profiles | Named `GpuDriverConfig` (`resource.nvidia.com/v1beta1`) YAML documents. Each profile sets `advertisement.gpu`, `advertisement.mig`, and `advertisement.vfio` to select which discovered device types remain allocatable and published; omitted types are not advertised. Feature gates remain release-wide. |
 
 The profiles are used only when `featureGates.PerNodeGPUConfig=true`. The gate
 is disabled by default, so default installations do not create or mount the
@@ -62,8 +62,11 @@ and feature gates continue to determine publication.
 
 The selected profile filters the node's allocatable inventory at startup.
 Prepare rejects a stale allocation for a filtered device type. Metadata for
-filtered devices is retained only for checkpoint-driven teardown, so Unprepare
-can complete claims prepared under an earlier profile.
+filtered full GPU and static MIG devices is retained only for checkpoint-driven
+teardown, so Unprepare can complete claims prepared under an earlier profile.
+Excluded VFIO devices, and excluded MIG devices under `DynamicMIG`, are not
+discovered at all, so claims using them must be unprepared before the profile
+changes.
 
 Profiles are resolved only at startup. Node-label and ConfigMap profile-content
 changes do not roll plugin pods automatically. Changing

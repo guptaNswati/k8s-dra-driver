@@ -18,15 +18,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/component-base/featuregate"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/utils/ptr"
 
@@ -35,131 +36,95 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-type fakeVfioDeviceManager struct {
-	unconfigure func(*VfioDeviceInfo) error
-}
-
-func (f *fakeVfioDeviceManager) Configure(context.Context, *VfioDeviceInfo) error {
-	return nil
-}
-
-func (f *fakeVfioDeviceManager) Unconfigure(_ context.Context, info *VfioDeviceInfo) error {
-	return f.unconfigure(info)
-}
-
-// TestPrepareRejectsDeviceFilteredByDriverConfig prevents stale allocations from bypassing the selected profile.
-func TestPrepareRejectsDeviceFilteredByDriverConfig(t *testing.T) {
-	gpu := &AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: "0000:01:00.0"}}
-	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0, UUID: "GPU-0000", PciBusID: "0000:01:00.0"}}
-	perGPU := &PerGPUAllocatableDevices{
-		allocatablesMap: map[PCIBusID]AllocatableDevices{
-			"0000:01:00.0": {
-				gpu.CanonicalName():  gpu,
-				vfio.CanonicalName(): vfio,
-			},
-		},
-	}
-	driverConfig := &DriverConfig{
-		Version: driverConfigVersion,
-		GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{GpuDeviceType}},
-	}
-	perGPU.ApplyDriverConfig(driverConfig)
-
-	state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
-	state.config = &Config{flags: &Flags{nodeName: "node-a"}, driverConfig: driverConfig}
-	state.perGPUAllocatable = perGPU
-	claim := &resourceapi.ResourceClaim{
-		ObjectMeta: metav1.ObjectMeta{UID: "claim-uid"},
-		Status: resourceapi.ResourceClaimStatus{
-			Allocation: &resourceapi.AllocationResult{
-				Devices: resourceapi.DeviceAllocationResult{
-					Results: []resourceapi.DeviceRequestAllocationResult{
-						{Driver: DriverName, Device: vfio.CanonicalName()},
-					},
-				},
-			},
-		},
-	}
-
-	_, err := state.Prepare(context.Background(), claim)
-
-	require.ErrorContains(t, err, `allocated device "gpu-vfio-0" is excluded by the selected DriverConfig profile`)
-}
-
-// TestPrepareMissingAllowedDeviceUsesExistingPath preserves stale-sibling handling.
-func TestPrepareMissingAllowedDeviceUsesExistingPath(t *testing.T) {
+func TestPrepareRejectsDeviceExcludedByDriverConfig(t *testing.T) {
 	const pciBusID = "0000:01:00.0"
 	gpu := &AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: pciBusID}}
-	perGPU := &PerGPUAllocatableDevices{
-		allocatablesMap: map[PCIBusID]AllocatableDevices{
-			pciBusID: {gpu.CanonicalName(): gpu},
+	staticMig := &AllocatableDevice{MigStatic: &MigDeviceInfo{
+		Profile: "1g.5gb", ParentMinor: 0, GiProfileID: 19, PlacementStart: 0,
+	}}
+	const excludedErr = "is excluded by the selected DriverConfig profile"
+
+	tests := map[string]struct {
+		devices       []*AllocatableDevice
+		advertisement configapi.GpuAdvertisement
+		device        string
+		wantErr       string
+	}{
+		"full GPU excluded by profile": {
+			devices:       []*AllocatableDevice{gpu},
+			advertisement: configapi.GpuAdvertisement{Vfio: true},
+			device:        gpu.CanonicalName(),
+			wantErr:       `allocated device "gpu-0" ` + excludedErr,
+		},
+		"static MIG excluded by profile": {
+			devices:       []*AllocatableDevice{staticMig},
+			advertisement: configapi.GpuAdvertisement{Gpu: true},
+			device:        staticMig.CanonicalName(),
+			wantErr:       `allocated device "gpu-0-mig-1g5gb-19-0" ` + excludedErr,
+		},
+		"advertised device missing from inventory": {
+			devices:       []*AllocatableDevice{gpu},
+			advertisement: configapi.GpuAdvertisement{Gpu: true, Vfio: true},
+			device:        "gpu-vfio-0",
+			wantErr:       `allocatable not found for device "gpu-vfio-0"`,
+		},
+		"excluded VFIO device is never discovered": {
+			devices:       []*AllocatableDevice{gpu},
+			advertisement: configapi.GpuAdvertisement{Gpu: true},
+			device:        "gpu-vfio-0",
+			wantErr:       `allocatable not found for device "gpu-vfio-0"`,
 		},
 	}
-	driverConfig := &DriverConfig{
-		Version: driverConfigVersion,
-		GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{GpuDeviceType, VfioDeviceType}},
-	}
-	perGPU.ApplyDriverConfig(driverConfig)
 
-	state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
-	state.config = &Config{flags: &Flags{nodeName: "node-a"}, driverConfig: driverConfig}
-	state.perGPUAllocatable = perGPU
-	claim := &resourceapi.ResourceClaim{
-		ObjectMeta: metav1.ObjectMeta{UID: "claim-uid"},
-		Status: resourceapi.ResourceClaimStatus{
-			Allocation: &resourceapi.AllocationResult{
-				Devices: resourceapi.DeviceAllocationResult{
-					Results: []resourceapi.DeviceRequestAllocationResult{
-						{Driver: DriverName, Device: "gpu-vfio-0"},
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			devices := make(AllocatableDevices)
+			for _, device := range tc.devices {
+				devices[device.CanonicalName()] = device
+			}
+			perGPU := &PerGPUAllocatableDevices{
+				allocatablesMap: map[PCIBusID]AllocatableDevices{pciBusID: devices},
+			}
+			driverConfig := &DriverConfig{Advertisement: tc.advertisement}
+			perGPU.ApplyDriverConfig(driverConfig)
+
+			state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+			state.config = &Config{flags: &Flags{nodeName: "node-a"}, driverConfig: driverConfig}
+			state.perGPUAllocatable = perGPU
+			claim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{UID: "claim-uid"},
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{
+							Results: []resourceapi.DeviceRequestAllocationResult{
+								{Driver: DriverName, Device: tc.device},
+							},
+						},
 					},
 				},
-			},
-		},
+			}
+
+			_, err := state.Prepare(context.Background(), claim)
+
+			require.ErrorContains(t, err, tc.wantErr)
+		})
 	}
-
-	_, err := state.Prepare(context.Background(), claim)
-
-	require.ErrorContains(t, err, `allocatable not found for device "gpu-vfio-0"`)
-	require.NotContains(t, err.Error(), "DriverConfig profile")
 }
 
-// TestUnprepareCheckpointedDeviceFilteredByDriverConfig keeps teardown independent of current profile selection.
-func TestUnprepareCheckpointedDeviceFilteredByDriverConfig(t *testing.T) {
-	gates := map[string]bool{
-		string(featuregates.PassthroughSupport):        true,
-		string(featuregates.DynamicMIG):                false,
-		string(featuregates.MPSSupport):                false,
-		string(featuregates.TimeSlicingSettings):       false,
-		string(featuregates.ConsumableShares):          false,
-		string(featuregates.FabricManagerPartitioning): false,
-	}
-	original := make(map[string]bool, len(gates))
-	for gate := range gates {
-		original[gate] = featuregates.FeatureGates().Enabled(featuregate.Feature(gate))
-	}
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(gates))
-	t.Cleanup(func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(original))
-	})
-
+// newPreparedGpuClaimTestState returns a state with one PrepareCompleted
+// full-GPU claim, inventory filtered by driverConfig as NewDeviceState does.
+func newPreparedGpuClaimTestState(t *testing.T, gpuInfo *GpuInfo, driverConfig *DriverConfig) (*DeviceState, kubeletplugin.NamespacedObject) {
+	t.Helper()
 	const claimUID = "claim-uid"
-	gpuInfo := &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: "0000:01:00.0"}
 	gpu := &AllocatableDevice{Gpu: gpuInfo}
-	vfioInfo := &VfioDeviceInfo{index: 0, UUID: gpuInfo.UUID, PciBusID: gpuInfo.pciBusID}
-	vfio := &AllocatableDevice{Vfio: vfioInfo}
 	perGPU := &PerGPUAllocatableDevices{
 		allocatablesMap: map[PCIBusID]AllocatableDevices{
-			gpuInfo.pciBusID: {
-				gpu.CanonicalName():  gpu,
-				vfio.CanonicalName(): vfio,
-			},
+			gpuInfo.pciBusID: {gpu.CanonicalName(): gpu},
 		},
 	}
-	driverConfig := &DriverConfig{
-		Version: driverConfigVersion,
-		GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{GpuDeviceType, MigStaticDeviceType}},
+	if driverConfig != nil {
+		perGPU.ApplyDriverConfig(driverConfig)
 	}
-	perGPU.ApplyDriverConfig(driverConfig)
 	checkpoint := &Checkpoint{V2: &CheckpointV2{
 		PreparedClaims: PreparedClaimsByUID{
 			claimUID: {
@@ -177,11 +142,9 @@ func TestUnprepareCheckpointedDeviceFilteredByDriverConfig(t *testing.T) {
 					{
 						Devices: PreparedDeviceList{
 							{
-								Vfio: &PreparedVfioDevice{
-									Info: vfioInfo,
-									Device: &CheckpointedDevice{
-										DeviceName: vfio.CanonicalName(),
-									},
+								Gpu: &PreparedGpu{
+									Info:   gpuInfo,
+									Device: &CheckpointedDevice{DeviceName: gpu.CanonicalName()},
 								},
 							},
 						},
@@ -194,29 +157,97 @@ func TestUnprepareCheckpointedDeviceFilteredByDriverConfig(t *testing.T) {
 	state.config = &Config{flags: &Flags{nodeName: "node-a"}, driverConfig: driverConfig}
 	state.perGPUAllocatable = perGPU
 	state.cdi = &CDIHandler{cdiRoot: t.TempDir()}
-	state.nvdevlib = &deviceLib{vfioEnabled: true}
-	var unconfiguredPCIBusID string
-	state.vfioPciManager = &fakeVfioDeviceManager{
-		unconfigure: func(info *VfioDeviceInfo) error {
-			unconfiguredPCIBusID = info.PciBusID
-			// Avoid sibling rediscovery, which is independent of the Unprepare-only lookup
-			// under test and requires a full NVML fake.
-			state.nvdevlib.vfioEnabled = false
-			return nil
-		},
-	}
 	claimRef := kubeletplugin.NamespacedObject{
 		NamespacedName: types.NamespacedName{Namespace: "default", Name: "claim"},
 		UID:            types.UID(claimUID),
 	}
+	return state, claimRef
+}
 
-	_, err := state.Unprepare(context.Background(), claimRef)
+func TestUnprepareGpuVfioRediscoveryFollowsDriverConfig(t *testing.T) {
+	tests := map[string]struct {
+		driverConfig *DriverConfig
+		wantProbe    bool
+	}{
+		"profile without vfio skips VFIO probing": {
+			driverConfig: &DriverConfig{Advertisement: configapi.GpuAdvertisement{Gpu: true, Mig: true}},
+		},
+		"profile with vfio probes VFIO": {
+			driverConfig: &DriverConfig{Advertisement: configapi.GpuAdvertisement{Gpu: true, Vfio: true}},
+			wantProbe:    true,
+		},
+		"no profile probes VFIO": {
+			wantProbe: true,
+		},
+	}
 
-	require.NoError(t, err)
-	require.Equal(t, vfioInfo.PciBusID, unconfiguredPCIBusID)
-	updated, err := state.getCheckpoint(context.Background())
-	require.NoError(t, err)
-	require.NotContains(t, updated.V2.PreparedClaims, claimUID)
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			setVfioTestFeatureGate(t, featuregates.PassthroughSupport, true)
+			setVfioTestFeatureGate(t, featuregates.DynamicMIG, false)
+			setVfioTestFeatureGate(t, featuregates.MPSSupport, false)
+			setVfioTestFeatureGate(t, featuregates.TimeSlicingSettings, false)
+			gpuInfo := &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: "0000:01:00.0", vfioEnabled: true}
+			state, claimRef := newPreparedGpuClaimTestState(t, gpuInfo, tc.driverConfig)
+			pci := &nvpci.InterfaceMock{GetGPUsFunc: func() ([]*nvpci.NvidiaPCIDevice, error) {
+				return nil, fmt.Errorf("vfio probe failed")
+			}}
+			state.nvdevlib = &deviceLib{vfioEnabled: true, nvpci: pci}
+
+			_, err := state.Unprepare(context.Background(), claimRef)
+
+			updated, cpErr := state.getCheckpoint(context.Background())
+			require.NoError(t, cpErr)
+			if tc.wantProbe {
+				require.ErrorContains(t, err, "vfio probe failed")
+				require.Len(t, pci.GetGPUsCalls(), 1)
+				require.Contains(t, updated.V2.PreparedClaims, string(claimRef.UID))
+				return
+			}
+			require.NoError(t, err)
+			require.Empty(t, pci.GetGPUsCalls())
+			require.NotContains(t, updated.V2.PreparedClaims, string(claimRef.UID))
+		})
+	}
+}
+
+func TestUnprepareDeactivatesFabricPartitionOfGpuExcludedByDriverConfig(t *testing.T) {
+	tests := map[string]struct {
+		advertisement configapi.GpuAdvertisement
+	}{
+		"GPU excluded by profile": {
+			advertisement: configapi.GpuAdvertisement{Mig: true},
+		},
+		"GPU advertised by profile": {
+			advertisement: configapi.GpuAdvertisement{Gpu: true},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			setVfioTestFeatureGate(t, featuregates.FabricManagerPartitioning, true)
+			setVfioTestFeatureGate(t, featuregates.PassthroughSupport, false)
+			setVfioTestFeatureGate(t, featuregates.DynamicMIG, false)
+			setVfioTestFeatureGate(t, featuregates.MPSSupport, false)
+			setVfioTestFeatureGate(t, featuregates.TimeSlicingSettings, false)
+			gpuInfo := &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: "0000:01:00.0", gpuModuleID: 1}
+			state, claimRef := newPreparedGpuClaimTestState(t, gpuInfo, &DriverConfig{Advertisement: tc.advertisement})
+			fmClient := &testFMClient{
+				partitions: []fabricmanager.Partition{
+					{ID: 1, IsActive: true, GPUs: []fabricmanager.PartitionGPU{{PhysicalID: 1, UUID: gpuInfo.UUID}}},
+				},
+			}
+			fmManager, err := fabricmanager.Open(fmClient)
+			require.NoError(t, err)
+			state.fmManager = fmManager
+			state.nvdevlib = &deviceLib{}
+
+			_, err = state.Unprepare(context.Background(), claimRef)
+
+			require.NoError(t, err)
+			require.Equal(t, []int{1}, fmClient.deactivatedIDs)
+		})
+	}
 }
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {

@@ -127,13 +127,16 @@ gpuDriverConfig:
   default: ""
   map:
     container: |-
-      version: v1alpha1
-      gpu:
-        advertisedDeviceTypes: [gpu, mig]
+      apiVersion: resource.nvidia.com/v1beta1
+      kind: GpuDriverConfig
+      advertisement:
+        gpu: true
+        mig: true
     passthrough: |-
-      version: v1alpha1
-      gpu:
-        advertisedDeviceTypes: [vfio]
+      apiVersion: resource.nvidia.com/v1beta1
+      kind: GpuDriverConfig
+      advertisement:
+        vfio: true
 
 # Feature gates configuration following Kubernetes patterns
 # Configure feature gates as key-value pairs (feature_name: true/false)

@@ -67,19 +67,12 @@ type DeviceConfigState struct {
 	TimeSliceApplied   *bool `json:"timeSliceApplied,omitempty"`
 }
 
-// vfioDeviceManager lets checkpointed-Unprepare tests verify the Unprepare-only lookup
-// without rebinding a host device.
-type vfioDeviceManager interface {
-	Configure(context.Context, *VfioDeviceInfo) error
-	Unconfigure(context.Context, *VfioDeviceInfo) error
-}
-
 type DeviceState struct {
 	sync.Mutex
 	cdi                      *CDIHandler
 	tsManager                *TimeSlicingManager
 	mpsManager               *MpsManager
-	vfioPciManager           vfioDeviceManager
+	vfioPciManager           *VfioPciManager
 	checkpointCleanupManager *CheckpointCleanupManager
 	config                   *Config
 
@@ -141,7 +134,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
 
-	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices()
+	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices(config.driverConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
@@ -203,7 +196,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 	}
 
-	var vfioPciManager vfioDeviceManager
+	var vfioPciManager *VfioPciManager
 	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
 		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
@@ -1255,7 +1248,9 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
 	case GpuDeviceType:
-		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.vfioEnabled {
+		// A profile that excludes vfio must not fail GPU teardown on VFIO probing.
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.vfioEnabled ||
+			!s.config.driverConfig.advertises(VfioDeviceType) {
 			return nil
 		}
 		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
