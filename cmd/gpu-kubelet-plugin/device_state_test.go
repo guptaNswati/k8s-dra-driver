@@ -1082,6 +1082,59 @@ func TestNormalizeAndValidateConfig(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestGetOpaqueDeviceConfigs(t *testing.T) {
+	tests := map[string]struct {
+		kind     string
+		requests []string
+		wantType runtime.Object
+		wantErr  string
+	}{
+		"gpu config":         {kind: "GpuConfig", wantType: &configapi.GpuConfig{}},
+		"mig device config":  {kind: "MigDeviceConfig", wantType: &configapi.MigDeviceConfig{}},
+		"vfio device config": {kind: "VfioDeviceConfig", wantType: &configapi.VfioDeviceConfig{}},
+		"driver config without requests": {
+			kind:    "GpuDriverConfig",
+			wantErr: "unsupported config type *v1beta1.GpuDriverConfig",
+		},
+		"driver config with requests": {
+			kind:     "GpuDriverConfig",
+			requests: []string{"gpu"},
+			wantErr:  "unsupported config type *v1beta1.GpuDriverConfig",
+		},
+		"compute domain channel config": {
+			kind:    "ComputeDomainChannelConfig",
+			wantErr: "unsupported config type *v1beta1.ComputeDomainChannelConfig",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			configs := []resourceapi.DeviceAllocationConfiguration{{
+				Source:   resourceapi.AllocationConfigSourceClaim,
+				Requests: tc.requests,
+				DeviceConfiguration: resourceapi.DeviceConfiguration{
+					Opaque: &resourceapi.OpaqueDeviceConfiguration{
+						Driver: DriverName,
+						Parameters: runtime.RawExtension{
+							Raw: []byte(fmt.Sprintf(`{"apiVersion":"resource.nvidia.com/v1beta1","kind":%q}`, tc.kind)),
+						},
+					},
+				},
+			}}
+
+			got, err := GetOpaqueDeviceConfigs(configapi.StrictDecoder, DriverName, configs)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			require.IsType(t, tc.wantType, got[0].Config)
+		})
+	}
+}
+
 // Prepare() checkpoints the claim status whole, so a mixed-driver claim leaves
 // results here that this driver did not place.
 func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {

@@ -13,7 +13,7 @@ metadata:
     {{- include "dra-driver-nvidia-gpu.labels" . | nindent 4 }}
 data:
 {{- range $name, $contents := .Values.gpuDriverConfig.map }}
-  {{ $name }}: |-
+  {{ $name | quote }}: |-
 {{ $contents | indent 4 }}
 {{- end }}
 {{- end }}

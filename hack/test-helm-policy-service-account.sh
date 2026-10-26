@@ -77,3 +77,16 @@ if helm template "${RELEASE_NAME}" "${CHART_PATH}" \
     echo "expected rendering to fail when the default GPU profile is missing" >&2
     exit 1
 fi
+
+# Profile names are ConfigMap keys and must stay strings even when YAML would
+# read them as null, booleans, or numbers.
+null_profile=$(helm template "${RELEASE_NAME}" "${CHART_PATH}" \
+    --namespace "${NAMESPACE}" \
+    --set gpuResourcesEnabledOverride=true \
+    --set featureGates.PerNodeGPUConfig=true \
+    --set-string 'gpuDriverConfig.map.null=kind: GpuDriverConfig' \
+    --show-only templates/gpu-driver-config.yaml)
+if [[ "${null_profile}" != *'"null": |-'* ]]; then
+    echo "GPU profile named null was not rendered as a string ConfigMap key" >&2
+    exit 1
+fi

@@ -1605,6 +1605,11 @@ func GetOpaqueDeviceConfigs(
 		if err != nil {
 			return nil, fmt.Errorf("error decoding config parameters: %w", err)
 		}
+		switch decodedConfig.(type) {
+		case *configapi.GpuConfig, *configapi.MigDeviceConfig, *configapi.VfioDeviceConfig:
+		default:
+			return nil, fmt.Errorf("unsupported config type %T", decodedConfig)
+		}
 
 		resultConfig := &OpaqueDeviceConfig{
 			Requests: config.Requests,
