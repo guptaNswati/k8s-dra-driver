@@ -196,6 +196,63 @@ func TestAddOrUpdateTaint_TimeAddedResetOnChange(t *testing.T) {
 	assert.Nil(t, dev.Taints()[0].TimeAdded, "TimeAdded should be nil so the API server sets a fresh timestamp")
 }
 
+func TestAddDeviceTaintPropagatesFatalParentXIDToMIGPartitions(t *testing.T) {
+	parent := &GpuInfo{
+		UUID:     "GPU-parent-1",
+		pciBusID: "0000:01:00.0",
+	}
+	gpu := &AllocatableDevice{Gpu: parent}
+	dynamic := &AllocatableDevice{MigDynamic: &MigSpec{Parent: parent}}
+	static := &AllocatableDevice{MigStatic: &MigDeviceInfo{parent: parent}}
+	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{PciBusID: parent.pciBusID}}
+	otherGPU := &AllocatableDevice{Gpu: &GpuInfo{
+		UUID:     "GPU-parent-2",
+		pciBusID: "0000:02:00.0",
+	}}
+	state := &DeviceState{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				parent.pciBusID: {
+					"gpu":     gpu,
+					"dynamic": dynamic,
+					"static":  static,
+					"vfio":    vfio,
+				},
+				otherGPU.Gpu.pciBusID: {
+					"other-gpu": otherGPU,
+				},
+			},
+		},
+	}
+	taint := &resourceapi.DeviceTaint{
+		Key:    TaintKeyXID,
+		Value:  "48",
+		Effect: resourceapi.DeviceTaintEffectNoSchedule,
+	}
+
+	require.True(t, state.AddDeviceTaint(gpu, &resourceapi.DeviceTaint{
+		Key:    TaintKeyXID,
+		Value:  "43",
+		Effect: resourceapi.DeviceTaintEffectNone,
+	}))
+	assert.Empty(t, dynamic.Taints(), "informational parent XIDs must not propagate")
+	assert.Empty(t, static.Taints(), "informational parent XIDs must not propagate")
+
+	require.True(t, state.AddDeviceTaint(gpu, taint))
+
+	for name, device := range map[string]*AllocatableDevice{
+		"parent GPU":            gpu,
+		"dynamic MIG partition": dynamic,
+		"static MIG partition":  static,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, []resourceapi.DeviceTaint{*taint}, device.Taints())
+		})
+	}
+	assert.Empty(t, vfio.Taints(), "VFIO sibling is not a MIG partition")
+	assert.Empty(t, otherGPU.Taints(), "devices on a different parent must not be tainted")
+}
+
 func TestPartGetDeviceIncludesHealthTaints(t *testing.T) {
 	parent := &GpuInfo{
 		UUID:                  "GPU-parent-1",
@@ -734,7 +791,9 @@ func TestGetDeviceIncludesHealthTaints(t *testing.T) {
 	assert.Equal(t, *taint, got.Taints[0])
 }
 func TestClearDynamicMIGXIDTaint(t *testing.T) {
-	dynamic := &AllocatableDevice{MigDynamic: &MigSpec{}}
+	parentInfo := &GpuInfo{pciBusID: "0000:01:00.0"}
+	parent := &AllocatableDevice{Gpu: parentInfo}
+	dynamic := &AllocatableDevice{MigDynamic: &MigSpec{Parent: parentInfo}}
 	dynamic.AddOrUpdateTaint(&resourceapi.DeviceTaint{
 		Key:   TaintKeyXID,
 		Value: "43",
@@ -753,6 +812,7 @@ func TestClearDynamicMIGXIDTaint(t *testing.T) {
 		perGPUAllocatable: &PerGPUAllocatableDevices{
 			allocatablesMap: map[PCIBusID]AllocatableDevices{
 				"0000:01:00.0": {
+					"parent":  parent,
 					"dynamic": dynamic,
 					"static":  static,
 				},
@@ -768,4 +828,17 @@ func TestClearDynamicMIGXIDTaint(t *testing.T) {
 
 	require.Len(t, static.Taints(), 1)
 	assert.Equal(t, TaintKeyXID, static.Taints()[0].Key)
+
+	parentXID := &resourceapi.DeviceTaint{
+		Key:    TaintKeyXID,
+		Value:  "48",
+		Effect: resourceapi.DeviceTaintEffectNoSchedule,
+	}
+	parent.AddOrUpdateTaint(parentXID)
+	dynamic.AddOrUpdateTaint(parentXID)
+
+	assert.False(t, state.clearDynamicMIGXIDTaint("dynamic"))
+	assert.Equal(t, []resourceapi.DeviceTaint{{
+		Key: TaintKeyGPULost,
+	}, *parentXID}, dynamic.Taints())
 }

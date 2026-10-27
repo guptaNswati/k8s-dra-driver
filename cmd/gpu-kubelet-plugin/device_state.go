@@ -1969,11 +1969,29 @@ func syncPreparedDevicesGaugeFromCheckpoint(nodeName string, cp *Checkpoint) {
 }
 
 // AddDeviceTaint adds or updates a DRA device taint on the given device under
-// the DeviceState lock. Returns true if the taint set was actually modified.
+// the DeviceState lock. A fatal XID on a physical GPU also taints its MIG
+// partitions because they depend on the same unhealthy hardware. Returns true
+// if any taint set was actually modified.
 func (s *DeviceState) AddDeviceTaint(d *AllocatableDevice, taint *resourceapi.DeviceTaint) bool {
 	s.Lock()
 	defer s.Unlock()
-	return d.AddOrUpdateTaint(taint)
+
+	modified := d.AddOrUpdateTaint(taint)
+	if d.Type() != GpuDeviceType ||
+		taint.Key != TaintKeyXID ||
+		taint.Effect != resourceapi.DeviceTaintEffectNoSchedule {
+		return modified
+	}
+
+	for _, device := range s.perGPUAllocatable.allocatablesMap[d.GetGPUPCIBusID()] {
+		if !device.IsStaticOrDynMigDevice() {
+			continue
+		}
+		if device.AddOrUpdateTaint(taint) {
+			modified = true
+		}
+	}
+	return modified
 }
 
 // Returns false on nodes where GPU hardware is not MIG capable (L4/Ada,T4/Turing)
@@ -2001,7 +2019,7 @@ func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {
 
 // clearDynamicMIGXIDTaint clears health state that belongs to a concrete
 // Dynamic MIG incarnation after that device no longer exists. Parent-scoped
-// taints, such as GPU lost or an unavailable health monitor, remain intact.
+// taints remain intact.
 //
 // NOTE: An XID event already queued before deletion could re-add the taint.
 // This cleanup intentionally does not track concrete MIG
@@ -2010,6 +2028,14 @@ func (s *DeviceState) clearDynamicMIGXIDTaint(name DeviceName) bool {
 	device := s.perGPUAllocatable.GetAllocatableDevice(name)
 	if device == nil || device.Type() != MigDynamicDeviceType {
 		return false
+	}
+	parent := s.perGPUAllocatable.GetGPUDeviceByPCIBusID(device.GetGPUPCIBusID())
+	if parent != nil {
+		for _, taint := range parent.Taints() {
+			if taint.Key == TaintKeyXID && taint.Effect == resourceapi.DeviceTaintEffectNoSchedule {
+				return false
+			}
+		}
 	}
 	if taint, removed := device.RemoveTaint(TaintKeyXID); removed {
 		klog.V(4).Infof("Cleared health taint for destroyed Dynamic MIG device %s: key=%q, value=%q, effect=%s",
